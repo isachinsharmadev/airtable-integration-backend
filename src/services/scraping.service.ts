@@ -880,29 +880,40 @@ export class ScrapingService {
         let oldValue = "";
         let newValue = "";
 
-        // ONLY process if it's an assignee/developer field (foreignKey type)
+        // Check if it's an assignee/developer field (select type with choice tokens)
         if (
           (fieldName.includes("assigned") ||
             fieldName.includes("assignee") ||
             fieldName.includes("developer")) &&
-          columnTypeAttr === "foreignKey"
+          columnTypeAttr === "select"
         ) {
           columnType = "assignee";
 
-          // Extract from foreignKey field format (linked records)
-          const foreignRecordContainer = $(".foreignRecordRendererContainer");
-          if (foreignRecordContainer.length > 0) {
-            // Extract added (new) and removed (old) foreign records
-            const addedRecord =
-              $(".foreignRecord.added").attr("title") ||
-              $(".foreignRecord.added").text().trim();
-            const removedRecord =
-              $(".foreignRecord.removed").attr("title") ||
-              $(".foreignRecord.removed").text().trim();
+          // Extract from select field format (choice tokens)
+          const choiceTokens = $(".choiceToken");
+          if (choiceTokens.length > 0) {
+            // Look for added (green plus icon) and removed (strikethrough) tokens
+            choiceTokens.each((i, elem) => {
+              const $elem = $(elem);
+              const style = $elem.attr("style") || "";
+              const title =
+                $elem.find(".truncate-pre").attr("title") ||
+                $elem.find(".truncate-pre").text().trim();
 
-            if (addedRecord || removedRecord) {
-              oldValue = removedRecord || "";
-              newValue = addedRecord || "";
+              // Check if this is the removed value (has line-through OR red shadow)
+              if (style.includes("line-through") || style.includes("red")) {
+                oldValue = title;
+              }
+              // Check if this is the added value (green shadow, no line-through)
+              else if (
+                style.includes("green") &&
+                !style.includes("line-through")
+              ) {
+                newValue = title;
+              }
+            });
+
+            if (oldValue || newValue) {
               console.log(`👤 Assignee change: "${oldValue}" → "${newValue}"`);
             }
           }
@@ -922,8 +933,8 @@ export class ScrapingService {
                 $elem.find(".truncate-pre").attr("title") ||
                 $elem.find(".truncate-pre").text().trim();
 
-              // Check if this is the removed value (has line-through)
-              if (style.includes("line-through")) {
+              // Check if this is the removed value (has line-through OR red shadow)
+              if (style.includes("line-through") || style.includes("red")) {
                 oldValue = title;
               }
               // Check if this is the added value (green shadow, no line-through)

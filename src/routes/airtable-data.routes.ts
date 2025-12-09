@@ -106,7 +106,7 @@ router.post(
   }
 );
 
-// Fetch all data (bases, tables, pages)
+// ORIGINAL: Fetch all data (sequential - SLOW for many bases)
 router.post("/fetch-all", async (req: Request, res: Response) => {
   try {
     const accessToken = await getAccessToken();
@@ -136,6 +136,143 @@ router.post("/fetch-all", async (req: Request, res: Response) => {
       .json({ error: "Failed to fetch all data", message: error.message });
   }
 });
+
+// NEW: Fetch all data with parallel processing (FAST)
+router.post("/fetch-all-parallel", async (req: Request, res: Response) => {
+  try {
+    const accessToken = await getAccessToken();
+
+    if (!accessToken) {
+      return res
+        .status(401)
+        .json({ error: "Not authenticated or token expired" });
+    }
+
+    const service = new AirtableService(accessToken);
+    const data = await service.fetchAllDataParallel();
+
+    res.json({
+      success: true,
+      summary: {
+        bases: data.bases.length,
+        tables: data.tables.length,
+        pages: data.pages.length,
+      },
+      data,
+    });
+  } catch (error: any) {
+    console.error("Error fetching all data (parallel):", error.message);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch all data", message: error.message });
+  }
+});
+
+// NEW: Table Proxy - Fetch only schemas (no records)
+router.post("/fetch-schemas-only", async (req: Request, res: Response) => {
+  try {
+    const accessToken = await getAccessToken();
+
+    if (!accessToken) {
+      return res
+        .status(401)
+        .json({ error: "Not authenticated or token expired" });
+    }
+
+    const service = new AirtableService(accessToken);
+    const data = await service.fetchAllDataTableProxyOnly();
+
+    res.json({
+      success: true,
+      summary: {
+        bases: data.bases.length,
+        tables: data.tables.length,
+        pages: 0, // No pages fetched
+      },
+      message: "Fetched table schemas only. Use /fetch-pages to get records.",
+      data,
+    });
+  } catch (error: any) {
+    console.error("Error fetching schemas:", error.message);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch schemas", message: error.message });
+  }
+});
+
+// NEW: Selective page fetching
+router.post("/fetch-pages-selective", async (req: Request, res: Response) => {
+  try {
+    const { tableIds } = req.body;
+
+    if (!tableIds || !Array.isArray(tableIds)) {
+      return res.status(400).json({
+        error: "tableIds array is required",
+        example: { tableIds: [{ baseId: "appXXX", tableId: "tblXXX" }] },
+      });
+    }
+
+    const accessToken = await getAccessToken();
+
+    if (!accessToken) {
+      return res
+        .status(401)
+        .json({ error: "Not authenticated or token expired" });
+    }
+
+    const service = new AirtableService(accessToken);
+    const pages = await service.fetchPagesSelective(tableIds);
+
+    res.json({
+      success: true,
+      count: pages.length,
+      pages,
+    });
+  } catch (error: any) {
+    console.error("Error in selective fetch:", error.message);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch pages", message: error.message });
+  }
+});
+
+// NEW: Incremental sync - fetch only modified records
+router.post(
+  "/fetch-pages-incremental/:baseId/:tableId",
+  async (req: Request, res: Response) => {
+    try {
+      const { baseId, tableId } = req.params;
+      const { lastSyncDate } = req.body;
+
+      const accessToken = await getAccessToken();
+
+      if (!accessToken) {
+        return res
+          .status(401)
+          .json({ error: "Not authenticated or token expired" });
+      }
+
+      const service = new AirtableService(accessToken);
+      const pages = await service.fetchPagesIncremental(
+        baseId,
+        tableId,
+        lastSyncDate ? new Date(lastSyncDate) : undefined
+      );
+
+      res.json({
+        success: true,
+        count: pages.length,
+        lastSyncDate: lastSyncDate || null,
+        pages,
+      });
+    } catch (error: any) {
+      console.error("Error in incremental sync:", error.message);
+      res
+        .status(500)
+        .json({ error: "Failed to sync pages", message: error.message });
+    }
+  }
+);
 
 // Get stored bases
 router.get("/bases", async (req: Request, res: Response) => {

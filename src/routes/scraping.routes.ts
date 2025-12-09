@@ -8,6 +8,18 @@ const router = Router();
 const activeJobs = new Map<string, any>();
 
 /**
+ * Helper function to check if a job is stalled (no activity for 30 minutes)
+ */
+function isJobStalled(job: any): boolean {
+  if (job.status === "completed" || job.status === "failed") {
+    return false; // Completed or failed jobs are not stalled
+  }
+  const lastActivityTime = job.lastActivityTime || job.startTime;
+  const stalledTime = 30 * 60 * 1000; // 30 minutes
+  return Date.now() - lastActivityTime.getTime() > stalledTime;
+}
+
+/**
  * POST /api/scraping/authenticate
  * Authenticate with Airtable and store cookies
  */
@@ -223,16 +235,46 @@ router.post(
  */
 router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
   try {
-    const { batchSize = 5 } = req.body;
+    const { batchSize = 5, force = false } = req.body;
 
     // Check if there's already an active job
-    if (activeJobs.has("revision-fetch")) {
-      return res.status(409).json({
-        success: false,
-        error: "A revision history fetch is already in progress",
-        message: "Please wait for the current job to complete",
-        jobId: "revision-fetch",
-      });
+    const existingJob = activeJobs.get("revision-fetch");
+    if (existingJob) {
+      // If job is completed or failed, allow restart
+      if (
+        existingJob.status === "completed" ||
+        existingJob.status === "failed"
+      ) {
+        console.log("✅ Previous job is completed, cleaning up for new run");
+        activeJobs.delete("revision-fetch");
+      }
+      // If job is running and not stalled, block unless force=true
+      else if (existingJob.status === "running" && !isJobStalled(existingJob)) {
+        if (!force) {
+          return res.status(409).json({
+            success: false,
+            error: "A revision history fetch is already in progress",
+            message:
+              "Please wait for the current job to complete or use force=true to override",
+            jobId: "revision-fetch",
+            currentJob: {
+              status: existingJob.status,
+              progress: {
+                processed: existingJob.processed,
+                total: existingJob.totalPages,
+                percentage: existingJob.percentage || 0,
+              },
+            },
+          });
+        }
+        // If force=true, remove the running job
+        activeJobs.delete("revision-fetch");
+      }
+      // If job is stalled, clean it up
+      else if (isJobStalled(existingJob)) {
+        console.warn("⚠️ Removing stalled revision-fetch job");
+        activeJobs.delete("revision-fetch");
+      }
     }
 
     // Verify cookies before starting
@@ -257,6 +299,7 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
     const jobInfo = {
       id: jobId,
       startTime: new Date(),
+      lastActivityTime: new Date(),
       status: "running",
       totalPages: pagesToProcess,
       processed: 0,
@@ -277,6 +320,7 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
           job.withoutHistory = progress.withoutHistory;
           job.errors = progress.errors;
           job.percentage = progress.percentage;
+          job.lastActivityTime = new Date(); // Update last activity
         }
       })
       .then(() => {
@@ -366,6 +410,40 @@ router.get("/job-status/:jobId", async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: "Failed to get job status",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * DELETE /api/scraping/jobs/:jobId
+ * Force clear a stuck job
+ */
+router.delete("/jobs/:jobId", async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+
+    const job = activeJobs.get(jobId);
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        error: "Job not found",
+        message: "The specified job does not exist",
+      });
+    }
+
+    const jobStatus = job.status;
+    activeJobs.delete(jobId);
+
+    res.json({
+      success: true,
+      message: `Job ${jobId} (status: ${jobStatus}) has been cleared`,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: "Failed to clear job",
       message: error.message,
     });
   }
