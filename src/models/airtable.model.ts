@@ -82,46 +82,70 @@ const PageSchema = new Schema<IPage>({
   updatedAt: { type: Date, default: Date.now },
 });
 
-// Revision History Schema
-export interface IRevisionHistory extends Document {
-  pageId: string;
-  baseId: string;
-  tableId: string;
-  revisions: Array<{
-    timestamp: Date;
-    user: string;
-    changeType: "assignee" | "status" | "other";
-    fieldName: string;
-    oldValue: string;
-    newValue: string;
-    rawHtml?: string;
-  }>;
-  createdAt: Date;
-  updatedAt: Date;
+export interface IRevisionHistoryItem {
+  uuid: string; // Unique identifier for this activity
+  issueId: string; // The record/ticket ID (e.g., recXXXXXXXXXXXXXX)
+  columnType: "assignee" | "status"; // Type of change
+  oldValue: string | null; // Previous value
+  newValue: string | null; // New value
+  createdDate: Date; // When the change occurred
+  authoredBy: string; // User who made the change (name or email)
 }
 
-const RevisionHistorySchema = new Schema<IRevisionHistory>({
-  pageId: { type: String, required: true, unique: true },
-  baseId: { type: String, required: true },
-  tableId: { type: String, required: true },
-  revisions: [
-    {
-      timestamp: { type: Date, required: true },
-      user: { type: String, required: true },
-      changeType: {
-        type: String,
-        enum: ["assignee", "status", "other"],
-        required: true,
-      },
-      fieldName: { type: String, required: true },
-      oldValue: { type: String },
-      newValue: { type: String },
-      rawHtml: { type: String },
+export interface IRevisionHistory extends Document {
+  pageId: string; // The record/ticket ID
+  baseId: string; // Airtable base ID
+  tableId: string; // Airtable table ID
+  revisions: IRevisionHistoryItem[]; // Array of revision items
+  updatedAt: Date;
+  createdAt: Date;
+}
+
+const RevisionHistoryItemSchema = new Schema(
+  {
+    uuid: { type: String, required: true },
+    issueId: { type: String, required: true },
+    columnType: {
+      type: String,
+      required: true,
+      enum: ["assignee", "status"],
     },
-  ],
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
-});
+    oldValue: { type: String, default: null },
+    newValue: { type: String, default: null },
+    createdDate: { type: Date, required: true },
+    authoredBy: { type: String, required: true },
+  },
+  { _id: false }
+);
+
+const RevisionHistorySchema = new Schema(
+  {
+    pageId: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+    baseId: {
+      type: String,
+      required: true,
+      index: true,
+    },
+    tableId: {
+      type: String,
+      required: true,
+      index: true,
+    },
+    revisions: [RevisionHistoryItemSchema],
+  },
+  {
+    timestamps: true,
+  }
+);
+
+// Compound index for efficient queries
+RevisionHistorySchema.index({ baseId: 1, tableId: 1 });
+RevisionHistorySchema.index({ pageId: 1 }, { unique: true });
 
 // Cookie Store Schema
 export interface ICookieStore extends Document {
