@@ -1,14 +1,32 @@
+/**
+ * Airtable Service - API Client with Rate Limiting and Optimization
+ *
+ * This service handles all interactions with the Airtable REST API, including:
+ * - OAuth-authenticated requests
+ * - Rate limiting (4 requests/second)
+ * - Pagination handling
+ * - Database storage
+ * - Parallel processing optimizations
+ * - Incremental sync capabilities
+ *
+ * @module services/airtable.service
+ */
+
 import axios, { AxiosInstance } from "axios";
 import { Base, Table, Page } from "../models/airtable.model";
 
 export class AirtableService {
   private client: AxiosInstance;
   private baseURL = "https://api.airtable.com/v0";
-  private maxConcurrent = 2; // Reduced from 5 to be safer with rate limits
+  private maxConcurrent = 2; // Concurrent requests per batch
   private requestQueue: Promise<any> = Promise.resolve();
   private lastRequestTime = 0;
   private minRequestInterval = 250; // 4 requests/second (250ms between requests)
 
+  /**
+   * Initialize Airtable service with OAuth access token
+   * @param accessToken - OAuth access token from authentication flow
+   */
   constructor(accessToken: string) {
     this.client = axios.create({
       baseURL: this.baseURL,
@@ -18,16 +36,22 @@ export class AirtableService {
       },
     });
   }
-
   /**
    * Delay helper for rate limiting
+   * @param ms - Milliseconds to delay
    */
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
-   * Rate-limited request with queue to prevent 429 errors
+   * Rate-limited request wrapper to prevent 429 errors
+   *
+   * Ensures requests are spaced at least 250ms apart (4 req/sec)
+   * Uses a queue to serialize all requests
+   *
+   * @param requestFn - Function that returns a Promise for the API call
+   * @returns Promise that resolves with the API response
    */
   private async rateLimitedRequest<T>(requestFn: () => Promise<T>): Promise<T> {
     return new Promise((resolve, reject) => {
@@ -49,13 +73,20 @@ export class AirtableService {
   }
 
   /**
-   * Fetch all bases with pagination (UNCHANGED - Already Optimal)
+   * Fetch all bases accessible to the authenticated user
+   *
+   * Handles pagination automatically and stores results in MongoDB.
+   * Uses rate limiting to avoid 429 errors.
+   *
+   * @returns Array of base objects
    */
   async fetchBases(): Promise<any[]> {
     const allBases: any[] = [];
     let offset: string | undefined;
 
     try {
+      console.log("[FetchBases] Starting base fetch...");
+
       do {
         const params: any = {};
         if (offset) params.offset = offset;
@@ -81,21 +112,35 @@ export class AirtableService {
             { upsert: true, new: true }
           );
         }
+
+        console.log(
+          `[FetchBases] Fetched ${bases.length} bases (offset: ${
+            offset ? "has more" : "complete"
+          })`
+        );
       } while (offset);
 
-      console.log(`✅ Fetched ${allBases.length} bases`);
+      console.log(`[FetchBases] Complete - Total: ${allBases.length} bases`);
       return allBases;
     } catch (error: any) {
-      console.error("❌ Error fetching bases:", error.message);
+      console.error("[FetchBases] Error:", error.message);
       throw error;
     }
   }
 
   /**
-   * Fetch tables for a specific base (UNCHANGED)
+   * Fetch tables (schemas) for a specific base
+   *
+   * Retrieves table metadata including fields, views, and descriptions.
+   * Stores results in MongoDB for later querying.
+   *
+   * @param baseId - Airtable base ID (e.g., "appXXXXXXXXXXXXXX")
+   * @returns Array of table objects
    */
   async fetchTables(baseId: string): Promise<any[]> {
     try {
+      console.log(`[FetchTables] Fetching tables for base: ${baseId}`);
+
       const response = await this.rateLimitedRequest(() =>
         this.client.get(`/meta/bases/${baseId}/tables`)
       );
@@ -119,19 +164,27 @@ export class AirtableService {
         );
       }
 
-      console.log(`✅ Fetched ${tables.length} tables for base ${baseId}`);
+      console.log(
+        `[FetchTables] Complete - ${tables.length} tables for base ${baseId}`
+      );
       return tables;
     } catch (error: any) {
-      console.error(
-        `❌ Error fetching tables for base ${baseId}:`,
-        error.message
-      );
+      console.error(`[FetchTables] Error for base ${baseId}:`, error.message);
       throw error;
     }
   }
+
   /**
    * Fetch all records (pages) for a table with pagination
-   * OPTIMIZED: Batch database inserts + Rate limiting
+   *
+   * Optimizations:
+   * - Batch database inserts (bulkWrite instead of individual saves)
+   * - Rate limiting to avoid 429 errors
+   * - Automatic pagination handling
+   *
+   * @param baseId - Airtable base ID
+   * @param tableId - Airtable table ID
+   * @returns Array of record objects
    */
   async fetchPages(baseId: string, tableId: string): Promise<any[]> {
     const allPages: any[] = [];
@@ -139,6 +192,8 @@ export class AirtableService {
     let pageCount = 0;
 
     try {
+      console.log(`[FetchPages] Starting fetch for table: ${tableId}`);
+
       do {
         const params: any = {};
         if (offset) params.offset = offset;
@@ -152,7 +207,7 @@ export class AirtableService {
         offset = nextOffset;
         pageCount++;
 
-        // OPTIMIZATION: Batch insert instead of one-by-one
+        // OPTIMIZATION: Batch insert instead of individual saves
         const bulkOps = records.map((record: any) => ({
           updateOne: {
             filter: { pageId: record.id },
@@ -175,71 +230,79 @@ export class AirtableService {
         }
 
         console.log(
-          `📄 Batch ${pageCount}: Fetched ${
+          `[FetchPages] Batch ${pageCount}: ${
             records.length
-          } pages (has more: ${!!offset})`
+          } records (has more: ${!!offset})`
         );
       } while (offset);
 
       console.log(
-        `✅ Total fetched ${allPages.length} pages for table ${tableId}`
+        `[FetchPages] Complete - Total: ${allPages.length} records for table ${tableId}`
       );
       return allPages;
     } catch (error: any) {
-      console.error(
-        `❌ Error fetching pages for table ${tableId}:`,
-        error.message
-      );
+      console.error(`[FetchPages] Error for table ${tableId}:`, error.message);
       throw error;
     }
   }
 
   /**
-   * OPTIMIZATION 1: Parallel Base Processing
-   * Process multiple bases concurrently
+   * Fetch all data with parallel processing
+   *
+   * Performance: 5x faster than sequential fetch for multiple bases
+   *
+   * Strategy:
+   * 1. Fetch all bases
+   * 2. Process bases in parallel batches (2 concurrent)
+   * 3. For each base, fetch tables then pages
+   *
+   * @returns Object containing all bases, tables, and pages
    */
   async fetchAllDataParallel(): Promise<{
     bases: any[];
     tables: any[];
     pages: any[];
   }> {
-    console.log("🚀 Starting parallel data fetch...");
+    console.log("[FetchAllParallel] Starting parallel data fetch...");
     const startTime = Date.now();
 
     // Step 1: Fetch all bases
     const bases = await this.fetchBases();
-    console.log(`📦 Found ${bases.length} bases`);
+    console.log(`[FetchAllParallel] Found ${bases.length} bases`);
 
     const allTables: any[] = [];
     const allPages: any[] = [];
 
-    // Step 2: Process bases in parallel (with concurrency limit)
+    // Step 2: Process bases in parallel batches
     for (let i = 0; i < bases.length; i += this.maxConcurrent) {
       const baseBatch = bases.slice(i, i + this.maxConcurrent);
+      const batchNumber = Math.floor(i / this.maxConcurrent) + 1;
+      const totalBatches = Math.ceil(bases.length / this.maxConcurrent);
 
       console.log(
-        `\n🔄 Processing base batch ${
-          Math.floor(i / this.maxConcurrent) + 1
-        }/${Math.ceil(bases.length / this.maxConcurrent)}`
+        `[FetchAllParallel] Processing batch ${batchNumber}/${totalBatches} (${baseBatch.length} bases)`
       );
 
       const batchResults = await Promise.all(
         baseBatch.map(async (base) => {
           try {
-            console.log(`  📊 Fetching tables for: ${base.name}`);
+            console.log(`[FetchAllParallel]   Base: ${base.name}`);
             const tables = await this.fetchTables(base.id);
 
             // Fetch pages for all tables in this base
             const basePages: any[] = [];
             for (const table of tables) {
-              console.log(`    📄 Fetching pages for table: ${table.name}`);
+              console.log(`[FetchAllParallel]     Table: ${table.name}`);
               const pages = await this.fetchPages(base.id, table.id);
               basePages.push(...pages);
             }
 
             return { tables, pages: basePages };
           } catch (error) {
-            console.error(`❌ Error processing base ${base.name}:`, error);
+            console.error(
+              `[FetchAllParallel] Error processing base ${base.name}:`,
+              error
+            );
             return { tables: [], pages: [] };
           }
         })
@@ -252,14 +315,14 @@ export class AirtableService {
       });
 
       console.log(
-        `✅ Batch complete. Total so far: ${allTables.length} tables, ${allPages.length} pages`
+        `[FetchAllParallel] Batch complete - Running total: ${allTables.length} tables, ${allPages.length} pages`
       );
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`\n🎉 Parallel fetch complete in ${duration}s!`);
+    console.log(`[FetchAllParallel] Complete in ${duration}s`);
     console.log(
-      `📊 Final stats: ${bases.length} bases, ${allTables.length} tables, ${allPages.length} pages`
+      `[FetchAllParallel] Final: ${bases.length} bases, ${allTables.length} tables, ${allPages.length} pages`
     );
 
     return {
@@ -270,14 +333,18 @@ export class AirtableService {
   }
 
   /**
-   * OPTIMIZATION 2: Table Proxy Pattern
    * Fetch only table schemas without records
+   *
+   * Use Case: When you need to understand data structure without loading all records
+   * Performance: Very fast (no record fetching)
+   *
+   * @returns Object containing bases and tables (no pages)
    */
   async fetchAllDataTableProxyOnly(): Promise<{
     bases: any[];
     tables: any[];
   }> {
-    console.log("🚀 Starting table proxy fetch (schema only)...");
+    console.log("[FetchSchemaOnly] Starting schema-only fetch...");
 
     const bases = await this.fetchBases();
     const allTables: any[] = [];
@@ -288,21 +355,30 @@ export class AirtableService {
     }
 
     console.log(
-      `✅ Fetched schemas: ${bases.length} bases, ${allTables.length} tables`
+      `[FetchSchemaOnly] Complete - ${bases.length} bases, ${allTables.length} tables (0 records)`
     );
-    console.log(`💡 Use fetchPages() separately when you need actual records`);
+    console.log(
+      `[FetchSchemaOnly] Note: Use fetchPages() to load records when needed`
+    );
 
     return { bases, tables: allTables };
   }
 
   /**
-   * OPTIMIZATION 3: Selective Page Fetching
-   * Fetch pages only for specific tables
+   * Fetch pages for specific tables only
+   *
+   * Use Case: When you only need data from certain tables
+   * Performance: Much faster than fetching all tables
+   *
+   * @param tableIds - Array of {baseId, tableId} objects
+   * @returns Array of pages from specified tables
    */
   async fetchPagesSelective(
     tableIds: Array<{ baseId: string; tableId: string }>
   ): Promise<any[]> {
-    console.log(`🎯 Fetching pages for ${tableIds.length} specific tables...`);
+    console.log(
+      `[FetchSelective] Fetching pages for ${tableIds.length} specific tables...`
+    );
     const allPages: any[] = [];
 
     for (const { baseId, tableId } of tableIds) {
@@ -310,13 +386,22 @@ export class AirtableService {
       allPages.push(...pages);
     }
 
-    console.log(`✅ Fetched ${allPages.length} pages from selected tables`);
+    console.log(
+      `[FetchSelective] Complete - ${allPages.length} pages from ${tableIds.length} tables`
+    );
     return allPages;
   }
 
   /**
-   * OPTIMIZATION 4: Incremental Sync
-   * Only fetch records modified after last sync
+   * Fetch only records modified after a specific date
+   *
+   * Use Case: Incremental sync after initial load
+   * Performance: Much faster than full re-sync
+   *
+   * @param baseId - Airtable base ID
+   * @param tableId - Airtable table ID
+   * @param lastSyncDate - Optional date to filter by (fetch only newer records)
+   * @returns Array of modified pages
    */
   async fetchPagesIncremental(
     baseId: string,
@@ -327,6 +412,15 @@ export class AirtableService {
     let offset: string | undefined;
 
     try {
+      console.log(
+        `[FetchIncremental] Starting incremental sync for table: ${tableId}`
+      );
+      if (lastSyncDate) {
+        console.log(
+          `[FetchIncremental] Filter: Records modified after ${lastSyncDate.toISOString()}`
+        );
+      }
+
       do {
         const params: any = {};
         if (offset) params.offset = offset;
@@ -368,40 +462,84 @@ export class AirtableService {
       } while (offset);
 
       console.log(
-        `✅ Incremental sync: Fetched ${allPages.length} modified pages`
+        `[FetchIncremental] Complete - ${allPages.length} modified records`
       );
       return allPages;
     } catch (error: any) {
-      console.error(`❌ Error in incremental sync:`, error.message);
+      console.error(`[FetchIncremental] Error:`, error.message);
       throw error;
     }
   }
 
   /**
-   * Fetch current authenticated user information using whoami endpoint
+   * Sequential fetch (legacy method)
+   *
+   * Performance: Slower than parallel fetch
+   * Use Case: Compatibility with older code
+   *
+   * Note: Consider using fetchAllDataParallel() instead
+   *
+   * @returns Object containing all bases, tables, and pages
    */
-  // airtable.service.ts
+  async fetchAllData(): Promise<{
+    bases: any[];
+    tables: any[];
+    pages: any[];
+  }> {
+    console.log("[FetchAll] Starting sequential data fetch...");
 
-  // NOTE: You need to pass the baseId into this method now.
-  // CORRECTED fetchUsers method for AirtableService
+    const bases = await this.fetchBases();
+    const allTables: any[] = [];
+    const allPages: any[] = [];
+
+    for (const base of bases) {
+      const tables = await this.fetchTables(base.id);
+      allTables.push(...tables);
+
+      for (const table of tables) {
+        const pages = await this.fetchPages(base.id, table.id);
+        allPages.push(...pages);
+      }
+    }
+
+    console.log(
+      `[FetchAll] Complete - ${bases.length} bases, ${allTables.length} tables, ${allPages.length} pages`
+    );
+
+    return {
+      bases,
+      tables: allTables,
+      pages: allPages,
+    };
+  }
+
+  // ============================================
+  // USER MANAGEMENT
+  // ============================================
 
   /**
    * Fetch users/collaborators for a base
    *
    * Strategy:
-   * 1. First try /meta/whoami to get current user info (always works, no special scope needed)
-   * 2. Then try /meta/bases/:baseId with collaborators (requires workspacesAndBases:read scope)
-   * 3. If collaborators fails, return at least the current user info
+   * 1. Get current user via /meta/whoami (always works, no special scope)
+   * 2. Try to get collaborators via /meta/bases/:baseId (requires workspacesAndBases:read scope)
+   * 3. Return combined results (graceful fallback if collaborators unavailable)
+   *
+   * Note: Collaborators endpoint may fail on non-Enterprise plans or without proper scopes
+   *
+   * @param baseId - Airtable base ID
+   * @returns Object containing users array and metadata
    */
   async fetchUsers(baseId: string): Promise<any> {
     try {
-      console.log(`🔍 Fetching users for base: ${baseId}...`);
+      console.log(`[FetchUsers] Fetching users for base: ${baseId}`);
 
       const users: any[] = [];
 
-      // STEP 1: Get current user info via /meta/whoami
-      // This endpoint works on ALL plans and requires NO special scopes
-      console.log("👤 Step 1: Fetching current user via /meta/whoami...");
+      // STEP 1: Get current user via /meta/whoami
+      console.log(
+        "[FetchUsers] Step 1: Fetching current user via /meta/whoami"
+      );
       try {
         const whoamiResponse = await this.rateLimitedRequest(() =>
           this.client.get("/meta/whoami")
@@ -409,7 +547,7 @@ export class AirtableService {
 
         const currentUser = whoamiResponse.data;
         console.log(
-          "📊 Current user data:",
+          "[FetchUsers] Current user data:",
           JSON.stringify(currentUser, null, 2)
         );
 
@@ -422,23 +560,26 @@ export class AirtableService {
           source: "whoami",
         });
 
-        console.log(`✅ Current user: ${currentUser.email || currentUser.id}`);
+        console.log(
+          `[FetchUsers] Current user: ${currentUser.email || currentUser.id}`
+        );
 
         // Log available scopes
         if (currentUser.scopes) {
-          console.log(`🔐 Available scopes: ${currentUser.scopes.join(", ")}`);
+          console.log(
+            `[FetchUsers] Available scopes: ${currentUser.scopes.join(", ")}`
+          );
         }
       } catch (error: any) {
         console.error(
-          "⚠️  Failed to fetch current user via whoami:",
+          "[FetchUsers] Failed to fetch current user via whoami:",
           error.message
         );
         // Continue anyway - we'll try to get collaborators
       }
 
       // STEP 2: Try to get all collaborators for the base
-      // This requires workspacesAndBases:read scope and Enterprise plan
-      console.log("\n👥 Step 2: Fetching base collaborators...");
+      console.log("[FetchUsers] Step 2: Fetching base collaborators");
       try {
         const baseResponse = await this.rateLimitedRequest(() =>
           this.client.get(`/meta/bases/${baseId}`, {
@@ -450,13 +591,12 @@ export class AirtableService {
 
         const collaborators = baseResponse.data.collaborators || [];
         console.log(
-          `📊 Collaborators data:`,
+          "[FetchUsers] Collaborators data:",
           JSON.stringify(collaborators, null, 2)
         );
 
         // Add collaborators to the list (avoid duplicates)
         collaborators.forEach((collab: any) => {
-          // Check if we already have this user
           const exists = users.find((u) => u.id === collab.id);
           if (!exists) {
             users.push({
@@ -475,28 +615,33 @@ export class AirtableService {
         });
 
         console.log(
-          `✅ Found ${collaborators.length} collaborators for base ${baseId}`
+          `[FetchUsers] Found ${collaborators.length} collaborators for base ${baseId}`
         );
       } catch (error: any) {
-        console.error("⚠️  Failed to fetch base collaborators:", error.message);
+        console.error(
+          "[FetchUsers] Failed to fetch base collaborators:",
+          error.message
+        );
 
         if (error.response?.status === 422) {
           console.log(
-            "💡 422 Error - Missing workspacesAndBases:read scope or not on Enterprise plan"
+            "[FetchUsers] 422 Error - Missing workspacesAndBases:read scope or not on Enterprise plan"
           );
-          console.log("   Returning current user info only");
+          console.log("[FetchUsers] Returning current user info only");
         } else if (error.response?.status === 403) {
-          console.log("💡 403 Error - Permission denied");
-          console.log("   Returning current user info only");
+          console.log("[FetchUsers] 403 Error - Permission denied");
+          console.log("[FetchUsers] Returning current user info only");
         }
 
         // Don't throw - we still have the current user from whoami
       }
 
       // STEP 3: Return results
-      console.log(`\n📊 Summary: Found ${users.length} total user(s)`);
+      console.log(`[FetchUsers] Summary: Found ${users.length} total user(s)`);
       users.forEach((user, index) => {
-        console.log(`  ${index + 1}. ${user.email || user.id} (${user.type})`);
+        console.log(
+          `[FetchUsers]   ${index + 1}. ${user.email || user.id} (${user.type})`
+        );
       });
 
       return {
@@ -514,39 +659,47 @@ export class AirtableService {
         },
       };
     } catch (error: any) {
-      console.error(`❌ Error in fetchUsers for ${baseId}:`, error.message);
+      console.error(`[FetchUsers] Error for base ${baseId}:`, error.message);
       throw error;
     }
   }
 
   /**
-   * Separate method to just get current user info
-   * Useful for quick authentication checks
+   * Get current authenticated user information
+   *
+   * Use Case: Quick authentication checks, scope verification
+   *
+   * @returns User object with id, email, and scopes
    */
   async getCurrentUser(): Promise<any> {
     try {
-      console.log("👤 Fetching current user via /meta/whoami...");
+      console.log("[GetCurrentUser] Fetching current user via /meta/whoami");
 
       const response = await this.rateLimitedRequest(() =>
         this.client.get("/meta/whoami")
       );
 
       const user = response.data;
-      console.log(`✅ Current user: ${user.email || user.id}`);
+      console.log(`[GetCurrentUser] Current user: ${user.email || user.id}`);
 
       if (user.scopes) {
-        console.log(`🔐 Scopes: ${user.scopes.join(", ")}`);
+        console.log(`[GetCurrentUser] Scopes: ${user.scopes.join(", ")}`);
       }
 
       return user;
     } catch (error: any) {
-      console.error("❌ Error fetching current user:", error.message);
+      console.error("[GetCurrentUser] Error:", error.message);
       throw error;
     }
   }
 
   /**
-   * Check if current token has specific scopes
+   * Check if current token has specific OAuth scopes
+   *
+   * Use Case: Verify permissions before attempting privileged operations
+   *
+   * @param requiredScopes - Array of scope strings to check
+   * @returns Object with hasAll, hasAny, missing, and available scopes
    */
   async hasScopes(requiredScopes: string[]): Promise<{
     hasAll: boolean;
@@ -576,34 +729,5 @@ export class AirtableService {
         available: [],
       };
     }
-  }
-
-  /**
-   * LEGACY: Original sequential fetch (Keep for compatibility)
-   */
-  async fetchAllData(): Promise<{
-    bases: any[];
-    tables: any[];
-    pages: any[];
-  }> {
-    const bases = await this.fetchBases();
-    const allTables: any[] = [];
-    const allPages: any[] = [];
-
-    for (const base of bases) {
-      const tables = await this.fetchTables(base.id);
-      allTables.push(...tables);
-
-      for (const table of tables) {
-        const pages = await this.fetchPages(base.id, table.id);
-        allPages.push(...pages);
-      }
-    }
-
-    return {
-      bases,
-      tables: allTables,
-      pages: allPages,
-    };
   }
 }

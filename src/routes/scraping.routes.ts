@@ -4,29 +4,27 @@ import { RevisionHistory, CookieStore, Page } from "../models/airtable.model";
 
 const router = Router();
 
-// Store active scraping jobs
 const activeJobs = new Map<string, any>();
 
 /**
- * Helper function to check if a job is stalled (no activity for 30 minutes)
+ * Check if a job has stalled (no activity for 30 minutes)
+ * @param job - Job object to check
+ * @returns true if job is stalled
  */
 function isJobStalled(job: any): boolean {
   if (job.status === "completed" || job.status === "failed") {
-    return false; // Completed or failed jobs are not stalled
+    return false;
   }
   const lastActivityTime = job.lastActivityTime || job.startTime;
   const stalledTime = 30 * 60 * 1000; // 30 minutes
   return Date.now() - lastActivityTime.getTime() > stalledTime;
 }
 
-/**
- * POST /api/scraping/authenticate
- * Authenticate with Airtable and store cookies
- */
 router.post("/authenticate", async (req: Request, res: Response) => {
   try {
     const { email, password, mfaCode, debugMode = false } = req.body;
 
+    // Validate required fields
     if (!email || !password) {
       return res.status(400).json({
         success: false,
@@ -36,7 +34,12 @@ router.post("/authenticate", async (req: Request, res: Response) => {
 
     const service = new ScrapingService();
 
-    console.log("🔐 Starting authentication...");
+    console.log(" Starting authentication...");
+    console.log(`   Email: ${email}`);
+    console.log(`   MFA Code: ${mfaCode ? "Provided" : "Not provided"}`);
+    console.log(`   Debug Mode: ${debugMode}`);
+
+    // Authenticate and get cookies
     const cookies = await service.authenticateAndGetCookies(
       email,
       password,
@@ -44,8 +47,12 @@ router.post("/authenticate", async (req: Request, res: Response) => {
       debugMode
     );
 
-    // Validate the cookies immediately
+    // Validate cookies immediately
     const isValid = await service.validateCookies(cookies);
+
+    console.log(" Authentication successful");
+    console.log(`   Cookies stored: Yes`);
+    console.log(`   Cookies valid: ${isValid}`);
 
     res.json({
       success: true,
@@ -55,9 +62,9 @@ router.post("/authenticate", async (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    console.error("❌ Authentication error:", error.message);
+    console.error(" Authentication error:", error.message);
 
-    // Provide specific error response for MFA
+    // Handle MFA requirement
     if (error.message === "MFA_CODE_REQUIRED") {
       return res.status(400).json({
         success: false,
@@ -67,6 +74,7 @@ router.post("/authenticate", async (req: Request, res: Response) => {
       });
     }
 
+    // Generic error response
     res.status(500).json({
       success: false,
       error: "Authentication failed",
@@ -76,10 +84,6 @@ router.post("/authenticate", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/scraping/validate-cookies
- * Validate stored cookies
- */
 router.get("/validate-cookies", async (req: Request, res: Response) => {
   try {
     const service = new ScrapingService();
@@ -102,7 +106,7 @@ router.get("/validate-cookies", async (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    console.error("❌ Cookie validation error:", error.message);
+    console.error(" Cookie validation error:", error.message);
     res.status(500).json({
       success: false,
       error: "Failed to validate cookies",
@@ -111,10 +115,6 @@ router.get("/validate-cookies", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/scraping/cookie-status
- * Get detailed cookie status
- */
 router.get("/cookie-status", async (req: Request, res: Response) => {
   try {
     const cookieStore = await CookieStore.findOne().sort({ updatedAt: -1 });
@@ -128,7 +128,7 @@ router.get("/cookie-status", async (req: Request, res: Response) => {
       });
     }
 
-    // Check cookie age
+    // Calculate cookie age
     const now = new Date();
     const cookieAge = now.getTime() - cookieStore.updatedAt.getTime();
     const cookieAgeMinutes = Math.floor(cookieAge / 1000 / 60);
@@ -147,7 +147,7 @@ router.get("/cookie-status", async (req: Request, res: Response) => {
       requiresAuth: !cookieStore.isValid,
     });
   } catch (error: any) {
-    console.error("❌ Error getting cookie status:", error.message);
+    console.error("Error getting cookie status:", error.message);
     res.status(500).json({
       success: false,
       error: "Failed to get cookie status",
@@ -156,106 +156,51 @@ router.get("/cookie-status", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/scraping/revision-history/:baseId/:tableId/:recordId
- * Fetch revision history for a specific record
- */
-router.post(
-  "/revision-history/:baseId/:tableId/:recordId",
-  async (req: Request, res: Response) => {
-    try {
-      const { baseId, tableId, recordId } = req.params;
+router.delete("/cookies", async (req: Request, res: Response) => {
+  try {
+    await CookieStore.deleteMany({});
 
-      const service = new ScrapingService();
-      const cookies = await service.getStoredCookies();
+    console.log("🧹 Cookies cleared");
 
-      if (!cookies) {
-        return res.status(401).json({
-          success: false,
-          error: "No valid cookies available",
-          message: "Please authenticate first",
-          requiresAuth: true,
-        });
-      }
-
-      console.log(`📥 Fetching revision history for record: ${recordId}`);
-      const revisions = await service.fetchRevisionHistory(
-        baseId,
-        tableId,
-        recordId,
-        cookies
-      );
-
-      // Store in database
-      await RevisionHistory.findOneAndUpdate(
-        { pageId: recordId },
-        {
-          pageId: recordId,
-          baseId,
-          tableId,
-          revisions,
-          updatedAt: new Date(),
-        },
-        { upsert: true, new: true }
-      );
-
-      res.json({
-        success: true,
-        count: revisions.length,
-        revisions,
-        recordId,
-        baseId,
-        tableId,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error: any) {
-      console.error("❌ Error fetching revision history:", error.message);
-
-      if (error.message === "COOKIES_EXPIRED") {
-        return res.status(401).json({
-          success: false,
-          error: "Cookies expired",
-          message: "Please re-authenticate",
-          requiresAuth: true,
-        });
-      }
-
-      res.status(500).json({
-        success: false,
-        error: "Failed to fetch revision history",
-        message: error.message,
-      });
-    }
+    res.json({
+      success: true,
+      message: "Cookies cleared successfully",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error("Error clearing cookies:", error.message);
+    res.status(500).json({
+      success: false,
+      error: "Failed to clear cookies",
+      message: error.message,
+    });
   }
-);
+});
 
-/**
- * POST /api/scraping/fetch-all-revisions
- * Fetch revision history for all pages (up to 200)
- */
 router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
   try {
     const { batchSize = 5, force = false } = req.body;
 
-    // Check if there's already an active job
+    // Check for existing active job
     const existingJob = activeJobs.get("revision-fetch");
+
     if (existingJob) {
-      // If job is completed or failed, allow restart
+      // Allow restart if job is completed or failed
       if (
         existingJob.status === "completed" ||
         existingJob.status === "failed"
       ) {
-        console.log("✅ Previous job is completed, cleaning up for new run");
+        console.log("Previous job completed, starting new run");
         activeJobs.delete("revision-fetch");
       }
-      // If job is running and not stalled, block unless force=true
+      // Block if job is running (unless force=true)
       else if (existingJob.status === "running" && !isJobStalled(existingJob)) {
         if (!force) {
           return res.status(409).json({
             success: false,
             error: "A revision history fetch is already in progress",
             message:
-              "Please wait for the current job to complete or use force=true to override",
+              "Please wait for the current job to complete or use force=true",
             jobId: "revision-fetch",
             currentJob: {
               status: existingJob.status,
@@ -267,12 +212,12 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
             },
           });
         }
-        // If force=true, remove the running job
+        console.log(" Force restarting job");
         activeJobs.delete("revision-fetch");
       }
-      // If job is stalled, clean it up
+      // Clean up stalled jobs
       else if (isJobStalled(existingJob)) {
-        console.warn("⚠️ Removing stalled revision-fetch job");
+        console.warn("  Removing stalled job");
         activeJobs.delete("revision-fetch");
       }
     }
@@ -290,9 +235,14 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
       });
     }
 
-    // Get page count
+    // Get page count (limit 200 as per requirements)
     const pageCount = await Page.countDocuments();
     const pagesToProcess = Math.min(pageCount, 200);
+
+    console.log(" Starting revision history fetch");
+    console.log(`   Total pages in DB: ${pageCount}`);
+    console.log(`   Pages to process: ${pagesToProcess}`);
+    console.log(`   Batch size: ${batchSize}`);
 
     // Create job tracking
     const jobId = "revision-fetch";
@@ -309,10 +259,10 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
     };
     activeJobs.set(jobId, jobInfo);
 
-    // Start the process asynchronously
+    // Start asynchronous processing
     service
       .fetchAllRevisionHistory(batchSize, (progress) => {
-        // Update job info
+        // Update job progress
         const job = activeJobs.get(jobId);
         if (job) {
           job.processed = progress.processed;
@@ -320,28 +270,31 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
           job.withoutHistory = progress.withoutHistory;
           job.errors = progress.errors;
           job.percentage = progress.percentage;
-          job.lastActivityTime = new Date(); // Update last activity
+          job.lastActivityTime = new Date();
         }
       })
       .then(() => {
-        console.log("✅ Revision history fetch completed successfully");
+        console.log(" Revision history fetch completed");
         const job = activeJobs.get(jobId);
         if (job) {
           job.status = "completed";
           job.endTime = new Date();
+          console.log(`   Processed: ${job.processed}/${job.totalPages}`);
+          console.log(`   With history: ${job.withHistory}`);
+          console.log(`   Without history: ${job.withoutHistory}`);
+          console.log(`   Errors: ${job.errors}`);
         }
-        // Remove job after 5 minutes
         setTimeout(() => activeJobs.delete(jobId), 5 * 60 * 1000);
       })
       .catch((err) => {
-        console.error("❌ Revision history fetch error:", err.message);
+        console.error(" Revision history fetch failed:", err.message);
         const job = activeJobs.get(jobId);
         if (job) {
           job.status = "failed";
           job.error = err.message;
           job.endTime = new Date();
         }
-        // Remove job after 5 minutes
+        // Clean up after 5 minutes
         setTimeout(() => activeJobs.delete(jobId), 5 * 60 * 1000);
       });
 
@@ -351,11 +304,11 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
       jobId: jobId,
       totalPages: pagesToProcess,
       batchSize: batchSize,
-      note: "Use GET /api/scraping/job-status/:jobId to check progress",
+      note: "Check progress at GET /api/scraping/job-status/revision-fetch",
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    console.error("❌ Error starting revision history fetch:", error.message);
+    console.error(" Error starting revision history fetch:", error.message);
     res.status(500).json({
       success: false,
       error: "Failed to start revision history fetch",
@@ -364,14 +317,89 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/scraping/job-status/:jobId
- * Get status of a scraping job
- */
+router.get("/revision-histories", async (req: Request, res: Response) => {
+  try {
+    const {
+      pageId,
+      baseId,
+      tableId,
+      limit = 200,
+      includeStats = "true",
+    } = req.query;
+
+    // Build query
+    const query: any = {};
+    if (pageId) query.pageId = pageId;
+    if (baseId) query.baseId = baseId;
+    if (tableId) query.tableId = tableId;
+
+    // Fetch histories
+    const histories = await RevisionHistory.find(query)
+      .sort({ updatedAt: -1 })
+      .limit(Number(limit));
+
+    console.log(`📊 Querying revision histories`);
+    console.log(`   Filters: ${JSON.stringify(query)}`);
+    console.log(`   Results: ${histories.length}`);
+
+    // Calculate statistics if requested
+    let stats = null;
+    if (includeStats === "true") {
+      const allRevisions = histories.flatMap((h) => h.revisions);
+      const assigneeChanges = allRevisions.filter(
+        (r) => r.columnType === "assignee"
+      );
+      const statusChanges = allRevisions.filter(
+        (r) => r.columnType === "status"
+      );
+      const uniqueUsers = new Set(allRevisions.map((r) => r.authoredBy));
+
+      // Get date range
+      const timestamps = allRevisions.map((r) =>
+        new Date(r.createdDate).getTime()
+      );
+      const oldestChange =
+        timestamps.length > 0 ? new Date(Math.min(...timestamps)) : null;
+      const newestChange =
+        timestamps.length > 0 ? new Date(Math.max(...timestamps)) : null;
+
+      stats = {
+        totalPages: histories.length,
+        totalRevisions: allRevisions.length,
+        assigneeChanges: assigneeChanges.length,
+        statusChanges: statusChanges.length,
+        uniqueUsers: uniqueUsers.size,
+        dateRange: {
+          oldest: oldestChange,
+          newest: newestChange,
+        },
+        averageRevisionsPerPage:
+          histories.length > 0
+            ? (allRevisions.length / histories.length).toFixed(2)
+            : 0,
+      };
+    }
+
+    res.json({
+      success: true,
+      count: histories.length,
+      stats: stats,
+      histories: histories,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error("Error retrieving revision histories:", error.message);
+    res.status(500).json({
+      success: false,
+      error: "Failed to retrieve revision histories",
+      message: error.message,
+    });
+  }
+});
+
 router.get("/job-status/:jobId", async (req: Request, res: Response) => {
   try {
     const { jobId } = req.params;
-
     const job = activeJobs.get(jobId);
 
     if (!job) {
@@ -415,280 +443,76 @@ router.get("/job-status/:jobId", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * DELETE /api/scraping/jobs/:jobId
- * Force clear a stuck job
- */
-router.delete("/jobs/:jobId", async (req: Request, res: Response) => {
-  try {
-    const { jobId } = req.params;
-
-    const job = activeJobs.get(jobId);
-    if (!job) {
-      return res.status(404).json({
-        success: false,
-        error: "Job not found",
-        message: "The specified job does not exist",
-      });
-    }
-
-    const jobStatus = job.status;
-    activeJobs.delete(jobId);
-
-    res.json({
-      success: true,
-      message: `Job ${jobId} (status: ${jobStatus}) has been cleared`,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      error: "Failed to clear job",
-      message: error.message,
-    });
-  }
-});
-
-/**
- * GET /api/scraping/revision-histories
- * Get stored revision histories with filtering and stats
- */
-router.get("/revision-histories", async (req: Request, res: Response) => {
-  try {
-    const {
-      pageId,
-      baseId,
-      tableId,
-      limit = 200,
-      includeStats = "true",
-    } = req.query;
-
-    const query: any = {};
-
-    if (pageId) query.pageId = pageId;
-    if (baseId) query.baseId = baseId;
-    if (tableId) query.tableId = tableId;
-
-    const histories = await RevisionHistory.find(query)
-      .sort({ updatedAt: -1 })
-      .limit(Number(limit));
-
-    let stats = null;
-    if (includeStats === "true") {
-      // Calculate detailed statistics
-      const allRevisions = histories.flatMap((h) => h.revisions);
-
-      const assigneeChanges = allRevisions.filter(
-        (r) => r.columnType === "assignee"
-      );
-      const statusChanges = allRevisions.filter(
-        (r) => r.columnType === "status"
-      );
-
-      // Get unique users
-      const uniqueUsers = new Set(allRevisions.map((r) => r.authoredBy));
-
-      // Get date range
-      const timestamps = allRevisions.map((r) =>
-        new Date(r.createdDate).getTime()
-      );
-      const oldestChange =
-        timestamps.length > 0 ? new Date(Math.min(...timestamps)) : null;
-      const newestChange =
-        timestamps.length > 0 ? new Date(Math.max(...timestamps)) : null;
-
-      stats = {
-        totalPages: histories.length,
-        totalRevisions: allRevisions.length,
-        assigneeChanges: assigneeChanges.length,
-        statusChanges: statusChanges.length,
-        uniqueUsers: uniqueUsers.size,
-        dateRange: {
-          oldest: oldestChange,
-          newest: newestChange,
-        },
-        averageRevisionsPerPage:
-          histories.length > 0
-            ? (allRevisions.length / histories.length).toFixed(2)
-            : 0,
-      };
-    }
-
-    res.json({
-      success: true,
-      count: histories.length,
-      stats: stats,
-      histories: histories,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    console.error("❌ Error retrieving revision histories:", error.message);
-    res.status(500).json({
-      success: false,
-      error: "Failed to retrieve revision histories",
-      message: error.message,
-    });
-  }
-});
-
-/**
- * GET /api/scraping/revision-histories/summary
- * Get a summary of all revision histories
- */
-router.get(
-  "/revision-histories/summary",
+router.post(
+  "/revision-history/:baseId/:tableId/:recordId",
   async (req: Request, res: Response) => {
     try {
-      const totalPages = await RevisionHistory.countDocuments();
+      const { baseId, tableId, recordId } = req.params;
 
-      // Get aggregated stats
-      const allHistories = await RevisionHistory.find();
-      const allRevisions = allHistories.flatMap((h) => h.revisions);
+      const service = new ScrapingService();
+      const cookies = await service.getStoredCookies();
 
-      const assigneeChanges = allRevisions.filter(
-        (r) => r.columnType === "assignee"
-      );
-      const statusChanges = allRevisions.filter(
-        (r) => r.columnType === "status"
-      );
-
-      // Group by base and table
-      const baseStats = new Map<string, any>();
-      for (const history of allHistories) {
-        const key = `${history.baseId}/${history.tableId}`;
-        if (!baseStats.has(key)) {
-          baseStats.set(key, {
-            baseId: history.baseId,
-            tableId: history.tableId,
-            pageCount: 0,
-            revisionCount: 0,
-          });
-        }
-        const stats = baseStats.get(key);
-        stats.pageCount++;
-        stats.revisionCount += history.revisions.length;
+      if (!cookies) {
+        return res.status(401).json({
+          success: false,
+          error: "No valid cookies available",
+          message: "Please authenticate first",
+          requiresAuth: true,
+        });
       }
+
+      console.log(`📥 Fetching revision history for: ${recordId}`);
+
+      const revisions = await service.fetchRevisionHistory(
+        baseId,
+        tableId,
+        recordId,
+        cookies
+      );
+
+      // Store in database
+      await RevisionHistory.findOneAndUpdate(
+        { pageId: recordId },
+        {
+          pageId: recordId,
+          baseId,
+          tableId,
+          revisions,
+          updatedAt: new Date(),
+        },
+        { upsert: true, new: true }
+      );
+
+      console.log(`✅ Found ${revisions.length} revisions`);
 
       res.json({
         success: true,
-        summary: {
-          totalPages: totalPages,
-          totalRevisions: allRevisions.length,
-          assigneeChanges: assigneeChanges.length,
-          statusChanges: statusChanges.length,
-          averageRevisionsPerPage:
-            totalPages > 0 ? (allRevisions.length / totalPages).toFixed(2) : 0,
-          byBaseAndTable: Array.from(baseStats.values()),
-        },
+        count: revisions.length,
+        revisions,
+        recordId,
+        baseId,
+        tableId,
         timestamp: new Date().toISOString(),
       });
     } catch (error: any) {
-      console.error("❌ Error getting summary:", error.message);
+      console.error("Error fetching revision history:", error.message);
+
+      if (error.message === "COOKIES_EXPIRED") {
+        return res.status(401).json({
+          success: false,
+          error: "Cookies expired",
+          message: "Please re-authenticate",
+          requiresAuth: true,
+        });
+      }
+
       res.status(500).json({
         success: false,
-        error: "Failed to get summary",
+        error: "Failed to fetch revision history",
         message: error.message,
       });
     }
   }
 );
-
-/**
- * DELETE /api/scraping/cookies
- * Clear stored cookies
- */
-router.delete("/cookies", async (req: Request, res: Response) => {
-  try {
-    await CookieStore.deleteMany({});
-    res.json({
-      success: true,
-      message: "Cookies cleared successfully",
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    console.error("❌ Error clearing cookies:", error.message);
-    res.status(500).json({
-      success: false,
-      error: "Failed to clear cookies",
-      message: error.message,
-    });
-  }
-});
-
-/**
- * DELETE /api/scraping/revision-histories
- * Clear all stored revision histories
- */
-router.delete("/revision-histories", async (req: Request, res: Response) => {
-  try {
-    const result = await RevisionHistory.deleteMany({});
-    res.json({
-      success: true,
-      message: "Revision histories cleared",
-      deletedCount: result.deletedCount,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    console.error("❌ Error clearing revision histories:", error.message);
-    res.status(500).json({
-      success: false,
-      error: "Failed to clear revision histories",
-      message: error.message,
-    });
-  }
-});
-
-/**
- * POST /api/scraping/test-single
- * Test fetching revision history for a single record
- */
-router.post("/test-single", async (req: Request, res: Response) => {
-  try {
-    const { baseId, tableId, recordId } = req.body;
-
-    if (!baseId || !tableId || !recordId) {
-      return res.status(400).json({
-        success: false,
-        error: "baseId, tableId, and recordId are required",
-      });
-    }
-
-    const service = new ScrapingService();
-    const cookies = await service.getOrExtractCookies();
-
-    console.log(`🧪 Testing single record: ${recordId}`);
-    const revisions = await service.fetchRevisionHistory(
-      baseId,
-      tableId,
-      recordId,
-      cookies
-    );
-
-    res.json({
-      success: true,
-      message: "Test successful",
-      recordId,
-      revisionCount: revisions.length,
-      revisions,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    console.error("❌ Test failed:", error.message);
-
-    if (error.message === "COOKIES_EXPIRED") {
-      return res.status(401).json({
-        success: false,
-        error: "Cookies expired",
-        requiresAuth: true,
-      });
-    }
-
-    res.status(500).json({
-      success: false,
-      error: "Test failed",
-      message: error.message,
-    });
-  }
-});
 
 export default router;

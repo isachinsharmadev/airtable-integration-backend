@@ -3,25 +3,16 @@ import * as cheerio from "cheerio";
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Browser, Page as PuppeteerPage } from "puppeteer";
-import {
-  CookieStore,
-  RevisionHistory,
-  Page,
-  OAuthToken,
-} from "../models/airtable.model";
+import { CookieStore, RevisionHistory, Page } from "../models/airtable.model";
 
-// Add stealth plugin
 puppeteer.use(StealthPlugin());
 
 export class ScrapingService {
   private airtableBaseUrl = "https://airtable.com";
   private browser: Browser | null = null;
   private maxRetries = 3;
-  private requestDelay = 1000;
+  private requestDelay = 1000; // 1 second between requests
 
-  /**
-   * Store cookies in database
-   */
   private async storeCookies(
     cookieString: string,
     mfaRequired: boolean,
@@ -38,18 +29,185 @@ export class ScrapingService {
       },
       { upsert: true, new: true }
     );
-    console.log("💾 Cookies stored in database");
+    console.log("[StoreCookies] Cookies stored in database");
   }
 
   /**
-   * Initialize browser with optimal settings
+   * Get stored cookies from database
+   * @returns Cookie string or null if not found
+   */
+  async getStoredCookies(): Promise<string | null> {
+    try {
+      const cookieStore = await CookieStore.findOne().sort({ updatedAt: -1 });
+      return cookieStore?.cookies || null;
+    } catch (error) {
+      console.error("[GetStoredCookies] Error:", error);
+      return null;
+    }
+  }
+
+  /**
+   * Get cookies with automatic validation
+   * Throws error if no valid cookies available
+   * @returns Valid cookie string
+   */
+  async getOrExtractCookies(): Promise<string> {
+    const cookieStore = await CookieStore.findOne().sort({ updatedAt: -1 });
+
+    if (cookieStore && cookieStore.isValid) {
+      // Check if cookies were validated recently (within 5 minutes)
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+
+      if (cookieStore.lastValidated > fiveMinutesAgo) {
+        console.log(
+          "[GetOrExtractCookies] Using cached cookies (validated recently)"
+        );
+        return cookieStore.cookies;
+      }
+
+      // Re-validate if older than 5 minutes
+      console.log("[GetOrExtractCookies] Re-validating cached cookies...");
+      const isValid = await this.validateCookies(cookieStore.cookies);
+
+      if (isValid) {
+        return cookieStore.cookies;
+      } else {
+        console.log("[GetOrExtractCookies] Cached cookies expired");
+      }
+    }
+
+    throw new Error(
+      "No valid cookies available. Please authenticate via /authenticate endpoint"
+    );
+  }
+
+  /**
+   * Validate cookies by testing against Airtable endpoints
+   * @param cookies - Cookie string to validate
+   * @returns true if cookies are valid
+   */
+  async validateCookies(cookies: string): Promise<boolean> {
+    try {
+      console.log("[ValidateCookies] Starting validation...");
+
+      // Test multiple endpoints to verify cookie validity
+      const endpoints = [
+        {
+          url: `${this.airtableBaseUrl}/v0.3/whoami`,
+          method: "GET" as const,
+        },
+        {
+          url: `${this.airtableBaseUrl}/v0.3/meta/bases`,
+          method: "GET" as const,
+        },
+        {
+          url: `${this.airtableBaseUrl}/v0.3/user/me`,
+          method: "GET" as const,
+        },
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          console.log(
+            `[ValidateCookies] Testing: ${endpoint.method} ${endpoint.url}`
+          );
+
+          const response = await axios({
+            method: endpoint.method,
+            url: endpoint.url,
+            headers: {
+              Cookie: cookies,
+              "User-Agent":
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              Accept: "application/json, text/plain, */*",
+              "Accept-Language": "en-US,en;q=0.9",
+              Referer: `${this.airtableBaseUrl}/`,
+              Origin: this.airtableBaseUrl,
+              "X-Requested-With": "XMLHttpRequest",
+              "Sec-Fetch-Dest": "empty",
+              "Sec-Fetch-Mode": "cors",
+              "Sec-Fetch-Site": "same-origin",
+            },
+            validateStatus: (status) => status >= 200 && status < 500,
+            timeout: 15000,
+          });
+
+          console.log(
+            `[ValidateCookies] Response: ${response.status} ${response.statusText}`
+          );
+
+          if (response.status === 200) {
+            console.log(
+              `[ValidateCookies] Success - Cookies valid (verified via ${endpoint.url})`
+            );
+
+            // Update database with validation timestamp
+            await CookieStore.findOneAndUpdate(
+              {},
+              {
+                isValid: true,
+                lastValidated: new Date(),
+              }
+            );
+
+            return true;
+          } else if (response.status === 401 || response.status === 403) {
+            console.log(
+              `[ValidateCookies] Unauthorized (${response.status}) - cookies invalid`
+            );
+          } else {
+            console.log(
+              `[ValidateCookies] Unexpected status: ${response.status}`
+            );
+          }
+        } catch (e: any) {
+          console.log(
+            `[ValidateCookies] Request failed: ${
+              e.response?.status || e.message
+            }`
+          );
+          continue; // Try next endpoint
+        }
+      }
+
+      console.log("[ValidateCookies] All validation endpoints failed");
+      console.log(
+        "[ValidateCookies] Marking as valid optimistically - will verify on first use"
+      );
+
+      // Mark as valid optimistically - some validation endpoints may fail even when cookies work
+      await CookieStore.findOneAndUpdate(
+        {},
+        {
+          isValid: true,
+          lastValidated: new Date(),
+        }
+      );
+
+      return true;
+    } catch (error) {
+      console.error("[ValidateCookies] Error:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Initialize Puppeteer browser with anti-detection settings
+   * @param debugMode - Show browser window (default: false)
+   * @returns Browser instance
    */
   private async initBrowser(debugMode: boolean = false): Promise<Browser> {
+    // Reuse existing browser if still connected
     if (this.browser && this.browser.isConnected()) {
       return this.browser;
     }
 
-    console.log("🚀 Launching browser with stealth mode...");
+    console.log("[InitBrowser] Launching browser with stealth mode...");
+    console.log(
+      `[InitBrowser] Debug mode: ${
+        debugMode ? "ON (visible)" : "OFF (headless)"
+      }`
+    );
 
     this.browser = await puppeteer.launch({
       headless: debugMode ? false : true,
@@ -64,41 +222,45 @@ export class ScrapingService {
         "--disable-gpu",
         "--disable-extensions",
       ],
-      // ignoreHTTPSErrors: true,
       defaultViewport: {
         width: 1920,
         height: 1080,
       },
     });
 
+    console.log("[InitBrowser] Browser launched successfully");
     return this.browser;
   }
 
   /**
-   * Close browser safely
+   * Close browser instance safely
    */
   async closeBrowser(): Promise<void> {
     if (this.browser) {
       try {
         await this.browser.close();
         this.browser = null;
-        console.log("🔒 Browser closed");
+        console.log("[CloseBrowser] Browser closed");
       } catch (error) {
-        console.error("Error closing browser:", error);
+        console.error("[CloseBrowser] Error closing browser:", error);
       }
     }
   }
 
   /**
-   * Create a new page with anti-detection settings
+   * Create new page with anti-detection headers and settings
+   * @param browser - Browser instance
+   * @returns Configured page
    */
   private async createStealthPage(browser: Browser): Promise<PuppeteerPage> {
     const page = await browser.newPage();
 
+    // Set realistic user agent
     await page.setUserAgent(
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
+    // Set realistic headers
     await page.setExtraHTTPHeaders({
       "Accept-Language": "en-US,en;q=0.9",
       "Accept-Encoding": "gzip, deflate, br",
@@ -111,6 +273,7 @@ export class ScrapingService {
       "Upgrade-Insecure-Requests": "1",
     });
 
+    // Override navigator.webdriver property to avoid detection
     await page.evaluateOnNewDocument(() => {
       // @ts-ignore
       Object.defineProperty(navigator, "webdriver", {
@@ -122,14 +285,19 @@ export class ScrapingService {
   }
 
   /**
-   * Wait helper
+   * Wait for specified milliseconds
+   * @param ms - Milliseconds to wait
    */
   private async wait(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
-   * Wait for element with retry logic
+   * Wait for selector with timeout and error handling
+   * @param page - Puppeteer page
+   * @param selector - CSS selector to wait for
+   * @param options - Wait options
+   * @returns true if element found, false otherwise
    */
   private async waitForSelectorSafe(
     page: PuppeteerPage,
@@ -144,13 +312,16 @@ export class ScrapingService {
       });
       return true;
     } catch (error) {
-      console.log(`⚠️  Selector not found: ${selector}`);
+      console.log(`[WaitForSelector] Selector not found: ${selector}`);
       return false;
     }
   }
 
   /**
-   * Type text with human-like behavior
+   * Type text with human-like delays to avoid detection
+   * @param page - Puppeteer page
+   * @param selector - CSS selector of input field
+   * @param text - Text to type
    */
   private async typeHuman(
     page: PuppeteerPage,
@@ -161,6 +332,7 @@ export class ScrapingService {
     await page.click(selector);
     await this.wait(500 + Math.random() * 500);
 
+    // Type character by character with random delays
     for (const char of text) {
       await page.keyboard.type(char, { delay: 50 + Math.random() * 100 });
     }
@@ -169,9 +341,12 @@ export class ScrapingService {
   }
 
   /**
-   * Authenticate with Airtable and retrieve cookies
-   * This is the ONLY method that uses Puppeteer
+   * Delay helper for rate limiting
+   * @param ms - Milliseconds to delay
    */
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
   async authenticateAndGetCookies(
     email: string,
     password: string,
@@ -183,10 +358,18 @@ export class ScrapingService {
     let mfaIsRequired = false;
 
     try {
+      console.log("[Authenticate] Starting authentication process");
+      console.log(`[Authenticate] Email: ${email}`);
+      console.log(
+        `[Authenticate] MFA Code: ${mfaCode ? "Provided" : "Not provided"}`
+      );
+
+      // Initialize browser
       browser = await this.initBrowser(debugMode);
       page = await this.createStealthPage(browser);
 
-      console.log("📄 Navigating to login page...");
+      // Navigate to login page
+      console.log("[Authenticate] Navigating to login page...");
       await page.goto(`${this.airtableBaseUrl}/login`, {
         waitUntil: "networkidle0",
         timeout: 60000,
@@ -198,8 +381,8 @@ export class ScrapingService {
         await page.screenshot({ path: "step1-login-page.png" });
       }
 
-      // Fill email
-      console.log("📧 Entering email...");
+      // STEP 1: Fill email
+      console.log("[Authenticate] Step 1: Entering email...");
       const emailSelectors = [
         'input[type="email"]',
         'input[name="email"]',
@@ -212,6 +395,7 @@ export class ScrapingService {
         if (await this.waitForSelectorSafe(page, selector, { timeout: 5000 })) {
           await this.typeHuman(page, selector, email);
           emailFound = true;
+          console.log("[Authenticate] Email entered successfully");
           break;
         }
       }
@@ -222,8 +406,8 @@ export class ScrapingService {
 
       await this.wait(1000);
 
-      // Click continue
-      console.log("🔘 Clicking continue...");
+      // Click continue button
+      console.log("[Authenticate] Clicking continue button...");
       const continueSelectors = [
         'button[type="submit"]',
         'button:has-text("Continue")',
@@ -256,8 +440,8 @@ export class ScrapingService {
         await page.screenshot({ path: "step2-after-email.png" });
       }
 
-      // Fill password
-      console.log("🔒 Entering password...");
+      // STEP 2: Fill password
+      console.log("[Authenticate] Step 2: Entering password...");
       const passwordSelectors = [
         'input[type="password"]',
         'input[name="password"]',
@@ -272,6 +456,7 @@ export class ScrapingService {
         ) {
           await this.typeHuman(page, selector, password);
           passwordFound = true;
+          console.log("[Authenticate] Password entered successfully");
           break;
         }
       }
@@ -283,7 +468,7 @@ export class ScrapingService {
       await this.wait(1000);
 
       // Submit login
-      console.log("✅ Submitting login...");
+      console.log("[Authenticate] Submitting login form...");
       const submitSelectors = [
         'button[type="submit"]',
         'button:has-text("Sign in")',
@@ -316,8 +501,8 @@ export class ScrapingService {
         await page.screenshot({ path: "step3-after-password.png" });
       }
 
-      // Check for MFA
-      console.log("🔍 Checking for MFA...");
+      // STEP 3: Check for MFA requirement
+      console.log("[Authenticate] Step 3: Checking for MFA requirement...");
       const mfaSelectors = [
         'input[name="code"]',
         'input[name="authCode"]',
@@ -331,24 +516,29 @@ export class ScrapingService {
         mfaInput = await page.$(selector);
         if (mfaInput) {
           mfaIsRequired = true;
-          console.log(`🔐 MFA input found: ${selector}`);
+          console.log(
+            `[Authenticate] MFA input detected (selector: ${selector})`
+          );
           break;
         }
       }
 
+      // Handle MFA if required
       if (mfaInput) {
         if (!mfaCode) {
+          console.log("[Authenticate] MFA code required but not provided");
           if (debugMode) {
             await page.screenshot({ path: "step4-mfa-required.png" });
           }
           throw new Error("MFA_CODE_REQUIRED");
         }
 
-        console.log("🔐 Entering MFA code...");
+        console.log("[Authenticate] Entering MFA code...");
 
         for (const selector of mfaSelectors) {
           if (await page.$(selector)) {
             await this.typeHuman(page, selector, mfaCode);
+            console.log("[Authenticate] MFA code entered");
             break;
           }
         }
@@ -356,6 +546,7 @@ export class ScrapingService {
         await this.wait(1000);
 
         // Submit MFA
+        console.log("[Authenticate] Submitting MFA code...");
         const mfaSubmitSelectors = [
           'button[type="submit"]',
           'button:has-text("Verify")',
@@ -389,17 +580,18 @@ export class ScrapingService {
         }
       }
 
-      // Verify login success
+      // STEP 4: Verify login success
       const currentUrl = page.url();
-      console.log("🔍 Current URL:", currentUrl);
+      console.log(`[Authenticate] Current URL: ${currentUrl}`);
 
-      // Check if we're still on login page (which would mean login failed)
+      // Check if still on login page (would indicate login failure)
       const isStillOnLogin =
         currentUrl.includes("/login") ||
         currentUrl.includes("/signin") ||
         currentUrl.includes("/sign-in");
 
       if (isStillOnLogin) {
+        console.error("[Authenticate] Login failed - still on login page");
         if (debugMode) {
           await page.screenshot({ path: "step6-login-failed.png" });
         }
@@ -408,60 +600,67 @@ export class ScrapingService {
         );
       }
 
-      // If we're NOT on login page and we're on airtable.com domain, we're logged in!
+      // Verify we're on Airtable domain
       if (!currentUrl.includes("airtable.com")) {
+        console.error(
+          "[Authenticate] Unexpected redirect - not on Airtable domain"
+        );
         throw new Error(
           `Unexpected redirect - not on Airtable domain. Current URL: ${currentUrl}`
         );
       }
 
-      console.log("✅ Login successful!");
+      console.log("[Authenticate] Login successful");
 
       if (debugMode) {
         await page.screenshot({ path: "step7-logged-in.png" });
       }
 
-      // Wait for cookies to be fully set
-      await this.wait(2000);
+      // STEP 5: Extract cookies
+      console.log("[Authenticate] Extracting cookies...");
+      await this.wait(2000); // Wait for cookies to be fully set
 
-      // Extract ALL cookies
       const cookies = await page.cookies();
 
       if (cookies.length === 0) {
         throw new Error("No cookies retrieved after login");
       }
 
-      // Create cookie string
+      // Convert to cookie string
       const cookieString = cookies
         .map((c) => `${c.name}=${c.value}`)
         .join("; ");
 
-      console.log(`🍪 Retrieved ${cookies.length} cookies`);
-      console.log("Cookie names:", cookies.map((c) => c.name).join(", "));
+      console.log(`[Authenticate] Retrieved ${cookies.length} cookies`);
+      console.log(
+        `[Authenticate] Cookie names: ${cookies.map((c) => c.name).join(", ")}`
+      );
 
-      // Store cookies in database
+      // Store in database
       await this.storeCookies(cookieString, mfaIsRequired);
 
-      // Close browser if not in debug mode
+      // Close browser unless in debug mode
       if (!debugMode) {
         await this.closeBrowser();
       }
 
-      console.log("✅ Authentication complete! Cookies stored.");
+      console.log("[Authenticate] Authentication complete - cookies stored");
 
       return cookieString;
     } catch (error: any) {
-      console.error("❌ Authentication error:", error.message);
+      console.error("[Authenticate] Authentication failed:", error.message);
 
+      // Save error screenshot if possible
       if (page) {
         try {
           await page.screenshot({ path: "error-screenshot.png" });
-          console.log("📸 Error screenshot saved");
+          console.log("[Authenticate] Error screenshot saved");
         } catch (e) {
           // Ignore screenshot errors
         }
       }
 
+      // Close browser on error (unless debug mode)
       if (!debugMode && browser) {
         await this.closeBrowser();
       }
@@ -471,179 +670,17 @@ export class ScrapingService {
   }
 
   /**
-   * Validate cookies by making a test API request
-   * This uses axios, NOT Puppeteer
-   */
-  async validateCookies(cookies: string): Promise<boolean> {
-    try {
-      console.log("🔍 Validating cookies...");
-
-      // Try endpoints in order of most likely to work
-      const endpoints = [
-        // Try whoami endpoint
-        {
-          url: `${this.airtableBaseUrl}/v0.3/whoami`,
-          method: "GET" as const,
-        },
-        // Try to fetch bases (if this works, revision history will definitely work)
-        {
-          url: `${this.airtableBaseUrl}/v0.3/meta/bases`,
-          method: "GET" as const,
-        },
-        // Try user endpoint
-        {
-          url: `${this.airtableBaseUrl}/v0.3/user/me`,
-          method: "GET" as const,
-        },
-      ];
-
-      for (const endpoint of endpoints) {
-        try {
-          console.log(`🔍 Testing: ${endpoint.method} ${endpoint.url}`);
-
-          const response = await axios({
-            method: endpoint.method,
-            url: endpoint.url,
-            headers: {
-              Cookie: cookies,
-              "User-Agent":
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              Accept: "application/json, text/plain, */*",
-              "Accept-Language": "en-US,en;q=0.9",
-              Referer: `${this.airtableBaseUrl}/`,
-              Origin: this.airtableBaseUrl,
-              "X-Requested-With": "XMLHttpRequest",
-              "Sec-Fetch-Dest": "empty",
-              "Sec-Fetch-Mode": "cors",
-              "Sec-Fetch-Site": "same-origin",
-            },
-            validateStatus: (status) => status >= 200 && status < 500,
-            timeout: 15000,
-          });
-
-          console.log(`📊 Response: ${response.status} ${response.statusText}`);
-
-          if (response.status === 200) {
-            console.log(`✅ Cookies valid! (verified via ${endpoint.url})`);
-
-            // Log a bit of the response for debugging
-            if (response.data) {
-              const dataStr = JSON.stringify(response.data);
-              console.log(
-                `📝 Response preview: ${dataStr.substring(0, 150)}...`
-              );
-            }
-
-            // Update database
-            await CookieStore.findOneAndUpdate(
-              {},
-              {
-                isValid: true,
-                lastValidated: new Date(),
-              }
-            );
-
-            return true;
-          } else if (response.status === 401 || response.status === 403) {
-            console.log(
-              `🔒 Unauthorized (${response.status}) - cookies invalid`
-            );
-          } else {
-            console.log(`⚠️  Unexpected status: ${response.status}`);
-          }
-        } catch (e: any) {
-          console.log(`❌ Request failed: ${e.response?.status || e.message}`);
-
-          // If we get response data, log it
-          if (e.response?.data) {
-            console.log(
-              `📝 Error response: ${JSON.stringify(e.response.data).substring(
-                0,
-                100
-              )}`
-            );
-          }
-
-          // Try next endpoint
-          continue;
-        }
-      }
-
-      console.log("❌ All validation endpoints failed");
-      console.log("💡 Cookies may still work for revision history endpoint");
-      console.log("💡 Marking as valid anyway - will verify on first use");
-
-      // Don't mark as invalid yet - let the revision history endpoint be the real test
-      // Some validation endpoints may fail even when cookies work
-      await CookieStore.findOneAndUpdate(
-        {},
-        {
-          isValid: true, // Mark as valid optimistically
-          lastValidated: new Date(),
-        }
-      );
-
-      return true; // Return true optimistically
-    } catch (error) {
-      console.error("❌ Cookie validation error:", error);
-      return false;
-    }
-  }
-
-  /**
-   * Get stored cookies with automatic validation
-   */
-  async getOrExtractCookies(): Promise<string> {
-    const cookieStore = await CookieStore.findOne().sort({ updatedAt: -1 });
-
-    if (cookieStore && cookieStore.isValid) {
-      // If validated within last 5 minutes, use cached
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-
-      if (cookieStore.lastValidated > fiveMinutesAgo) {
-        console.log("✅ Using cached cookies (validated < 5 min ago)");
-        return cookieStore.cookies;
-      }
-
-      // Re-validate if older than 5 minutes
-      console.log("🔄 Re-validating cached cookies...");
-      const isValid = await this.validateCookies(cookieStore.cookies);
-
-      if (isValid) {
-        return cookieStore.cookies;
-      } else {
-        console.log("❌ Cached cookies expired");
-      }
-    }
-
-    throw new Error(
-      "No valid cookies available. Please authenticate via /authenticate endpoint"
-    );
-  }
-
-  /**
-   * Get stored cookies (backwards compatibility)
-   */
-  async getStoredCookies(): Promise<string | null> {
-    try {
-      const cookieStore = await CookieStore.findOne().sort({ updatedAt: -1 });
-      return cookieStore?.cookies || null;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  /**
-   * Delay helper for rate limiting
-   */
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  /**
    * Fetch revision history for a single record
-   * This is the CUSTOM SCRAPING METHOD for changelogs
-   * Uses cookies obtained from Puppeteer authentication
+   *
+   * Uses Airtable's internal /readRowActivitiesAndComments endpoint
+   * with stored cookies for authentication.
+   *
+   * @param baseId - Airtable base ID
+   * @param tableId - Airtable table ID
+   * @param recordId - Airtable record ID
+   * @param cookies - Cookie string for authentication
+   * @param retryCount - Current retry attempt (for rate limiting)
+   * @returns Array of parsed revision history items
    */
   async fetchRevisionHistory(
     baseId: string,
@@ -653,31 +690,34 @@ export class ScrapingService {
     retryCount: number = 0
   ): Promise<any[]> {
     try {
-      // Airtable's actual endpoint structure includes query parameters
+      console.log(
+        `[FetchRevision] Fetching revision history for record: ${recordId}`
+      );
+
+      // Build query parameters
       const stringifiedObjectParams = JSON.stringify({
-        limit: 100, // Get more activities
+        limit: 100,
         offsetV2: null,
         shouldReturnDeserializedActivityItems: true,
         shouldIncludeRowActivityOrCommentUserObjById: true,
       });
 
-      // Generate IDs that Airtable uses for tracking
+      // Generate unique IDs for tracking
       const requestId = `req${Math.random().toString(36).substring(2, 15)}`;
       const secretSocketId = `soc${Math.random()
         .toString(36)
         .substring(2, 15)}`;
       const pageLoadId = `pgl${Math.random().toString(36).substring(2, 15)}`;
 
-      // Build the URL with query parameters
+      // Build request URL
       const url = `${this.airtableBaseUrl}/v0.3/row/${recordId}/readRowActivitiesAndComments`;
 
-      console.log(`📥 Fetching revision history for record: ${recordId}`);
-
+      // Make request
       const response = await axios.get(url, {
         params: {
           stringifiedObjectParams,
           requestId,
-          secretSocketId, // Add the secret socket ID
+          secretSocketId,
         },
         headers: {
           Cookie: cookies,
@@ -686,9 +726,9 @@ export class ScrapingService {
           "User-Agent":
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "X-Requested-With": "XMLHttpRequest",
-          "x-time-zone": "America/Toronto", // Use proper timezone
+          "x-time-zone": "America/Toronto",
           "x-user-locale": "en",
-          "x-airtable-application-id": baseId, // Application context
+          "x-airtable-application-id": baseId,
           "x-airtable-inter-service-client": "webClient",
           "x-airtable-page-load-id": pageLoadId,
           Referer: `${this.airtableBaseUrl}/${baseId}/${tableId}`,
@@ -705,17 +745,19 @@ export class ScrapingService {
         timeout: 30000,
       });
 
-      // Check the actual Airtable response structure
+      // Parse response
       if (response.data && response.data.data) {
         const data = response.data.data;
 
-        console.log(`✅ Received response for ${recordId}`);
-        console.log(`📊 Response has: ${Object.keys(data).join(", ")}`);
+        console.log(`[FetchRevision] Received response for ${recordId}`);
+        console.log(
+          `[FetchRevision] Response has: ${Object.keys(data).join(", ")}`
+        );
 
         // Parse row activities
         if (data.rowActivityInfoById) {
           const activityIds = Object.keys(data.rowActivityInfoById);
-          console.log(`📋 Found ${activityIds.length} activities`);
+          console.log(`[FetchRevision] Found ${activityIds.length} activities`);
 
           const activities = Object.entries(data.rowActivityInfoById).map(
             ([id, activity]: [string, any]) => {
@@ -731,9 +773,8 @@ export class ScrapingService {
                 ],
               };
 
-              // Log each activity for debugging
               console.log(
-                `  📄 Activity ${id.substring(0, 8)}... by ${
+                `[FetchRevision]   Activity ${id.substring(0, 8)}... by ${
                   activityData.user?.name || activity.originatingUserId
                 }`
               );
@@ -742,9 +783,7 @@ export class ScrapingService {
             }
           );
 
-          console.log(
-            `✅ Mapped ${activities.length} activities for ${recordId}`
-          );
+          console.log(`[FetchRevision] Mapped ${activities.length} activities`);
 
           const parsed = this.parseRevisionHistory(
             activities,
@@ -754,18 +793,18 @@ export class ScrapingService {
           );
 
           console.log(
-            `📝 Successfully parsed ${parsed.length} assignee/status changes`
+            `[FetchRevision] Successfully parsed ${parsed.length} assignee/status changes`
           );
           return parsed;
         } else {
-          console.log(`⚠️  No rowActivityInfoById in response`);
+          console.log(`[FetchRevision] No rowActivityInfoById in response`);
         }
       }
 
-      // Fallback: Check old response structures
+      // Fallback: Check old response format
       if (response.data && response.data.activities) {
         console.log(
-          `✅ Found ${response.data.activities.length} activities (old format) for ${recordId}`
+          `[FetchRevision] Found ${response.data.activities.length} activities (old format)`
         );
 
         const parsed = this.parseRevisionHistory(
@@ -775,35 +814,45 @@ export class ScrapingService {
           tableId
         );
 
-        console.log(`📝 Parsed ${parsed.length} assignee/status changes`);
+        console.log(
+          `[FetchRevision] Parsed ${parsed.length} assignee/status changes`
+        );
         return parsed;
       }
 
-      console.log(`⚠️  No activities found for ${recordId}`);
-      console.log(`📊 Response keys:`, Object.keys(response.data || {}));
+      console.log(`[FetchRevision] No activities found for ${recordId}`);
+      console.log(
+        `[FetchRevision] Response keys: ${Object.keys(response.data || {}).join(
+          ", "
+        )}`
+      );
       return [];
     } catch (error: any) {
-      // Handle specific HTTP errors
+      // Handle HTTP errors
       if (error.response) {
         const status = error.response.status;
 
-        // 404 = no revision history exists (normal)
+        // 404 = no revision history exists (normal, not an error)
         if (status === 404) {
-          console.log(`ℹ️  No revision history for ${recordId} (404)`);
+          console.log(
+            `[FetchRevision] No revision history for ${recordId} (404)`
+          );
           return [];
         }
 
         // 401/403 = cookies expired
         if ([401, 403].includes(status)) {
-          console.log("🔄 Cookies expired, marking invalid...");
+          console.log("[FetchRevision] Cookies expired, marking invalid");
           await CookieStore.findOneAndUpdate({}, { isValid: false });
           throw new Error("COOKIES_EXPIRED");
         }
 
-        // 429 = rate limited, retry with backoff
+        // 429 = rate limited, retry with exponential backoff
         if (status === 429 && retryCount < this.maxRetries) {
           const waitTime = Math.pow(2, retryCount) * 1000;
-          console.log(`⏳ Rate limited (429), waiting ${waitTime}ms...`);
+          console.log(
+            `[FetchRevision] Rate limited (429), waiting ${waitTime}ms...`
+          );
           await this.delay(waitTime);
 
           return this.fetchRevisionHistory(
@@ -815,23 +864,23 @@ export class ScrapingService {
           );
         }
 
-        // 400 = bad request, log details
+        // 400 = bad request
         if (status === 400) {
           console.error(
-            `❌ Bad request for ${recordId}:`,
+            `[FetchRevision] Bad request for ${recordId}:`,
             error.response?.data
           );
         }
       }
 
-      // Log other errors (but not 404s)
+      // Log other errors (except 404)
       if (error.response?.status !== 404) {
         console.error(
-          `❌ Error fetching revision for ${recordId}:`,
+          `[FetchRevision] Error fetching revision for ${recordId}:`,
           error.message
         );
         if (error.response?.data) {
-          console.error(`   Response:`, error.response.data);
+          console.error(`[FetchRevision]   Response:`, error.response.data);
         }
       }
 
@@ -840,9 +889,19 @@ export class ScrapingService {
   }
 
   /**
-   * Parse revision history activities
-   * Extracts ONLY assignee and status changes from HTML content
-   * Returns format: { uuid, issueId, columnType, oldValue, newValue, createdDate, authoredBy }
+   * Parse revision history HTML to extract assignee and status changes
+   *
+   * Uses Cheerio to parse HTML and extract:
+   * - Field name (assignee, status)
+   * - Old value (red/strikethrough)
+   * - New value (green)
+   * - Metadata (timestamp, user)
+   *
+   * @param activities - Array of activity objects with HTML content
+   * @param pageId - Record ID
+   * @param baseId - Base ID
+   * @param tableId - Table ID
+   * @returns Array of parsed revision objects
    */
   private parseRevisionHistory(
     activities: any[],
@@ -862,16 +921,16 @@ export class ScrapingService {
         // Use diffRowHtml if available, otherwise htmlContent
         const htmlContent = activity.diffRowHtml || activity.htmlContent;
 
-        // Load HTML with cheerio
+        // Load HTML with Cheerio
         const $ = cheerio.load(htmlContent);
 
-        // Get the field name from the HTML
+        // Extract field name
         const fieldNameElement = $(
           ".historicalCellContainer .micro.strong.caps"
         );
         const fieldName = fieldNameElement.text().trim().toLowerCase();
 
-        // Get the column type attribute if available
+        // Extract column type attribute
         const columnTypeAttr =
           $(".historicalCellValueContainer").attr("columntypeifunchanged") ||
           "";
@@ -880,7 +939,7 @@ export class ScrapingService {
         let oldValue = "";
         let newValue = "";
 
-        // Check if it's an assignee/developer field (select type with choice tokens)
+        // Check if it's an assignee field
         if (
           (fieldName.includes("assigned") ||
             fieldName.includes("assignee") ||
@@ -889,10 +948,9 @@ export class ScrapingService {
         ) {
           columnType = "assignee";
 
-          // Extract from select field format (choice tokens)
+          // Extract choice tokens
           const choiceTokens = $(".choiceToken");
           if (choiceTokens.length > 0) {
-            // Look for added (green plus icon) and removed (strikethrough) tokens
             choiceTokens.each((i, elem) => {
               const $elem = $(elem);
               const style = $elem.attr("style") || "";
@@ -900,11 +958,11 @@ export class ScrapingService {
                 $elem.find(".truncate-pre").attr("title") ||
                 $elem.find(".truncate-pre").text().trim();
 
-              // Check if this is the removed value (has line-through OR red shadow)
+              // Removed value (red/strikethrough)
               if (style.includes("line-through") || style.includes("red")) {
                 oldValue = title;
               }
-              // Check if this is the added value (green shadow, no line-through)
+              // Added value (green, no strikethrough)
               else if (
                 style.includes("green") &&
                 !style.includes("line-through")
@@ -914,18 +972,19 @@ export class ScrapingService {
             });
 
             if (oldValue || newValue) {
-              console.log(`👤 Assignee change: "${oldValue}" → "${newValue}"`);
+              console.log(
+                `[ParseRevision] Assignee change: "${oldValue}" -> "${newValue}"`
+              );
             }
           }
         }
-        // ONLY process if it's a status field (select type)
+        // Check if it's a status field
         else if (fieldName.includes("status") && columnTypeAttr === "select") {
           columnType = "status";
 
-          // Extract from select field format (choice tokens)
+          // Extract choice tokens
           const choiceTokens = $(".choiceToken");
           if (choiceTokens.length > 0) {
-            // Look for added (green plus icon) and removed (strikethrough) tokens
             choiceTokens.each((i, elem) => {
               const $elem = $(elem);
               const style = $elem.attr("style") || "";
@@ -933,11 +992,11 @@ export class ScrapingService {
                 $elem.find(".truncate-pre").attr("title") ||
                 $elem.find(".truncate-pre").text().trim();
 
-              // Check if this is the removed value (has line-through OR red shadow)
+              // Removed value (red/strikethrough)
               if (style.includes("line-through") || style.includes("red")) {
                 oldValue = title;
               }
-              // Check if this is the added value (green shadow, no line-through)
+              // Added value (green, no strikethrough)
               else if (
                 style.includes("green") &&
                 !style.includes("line-through")
@@ -947,17 +1006,18 @@ export class ScrapingService {
             });
 
             if (oldValue || newValue) {
-              console.log(`📊 Status change: "${oldValue}" → "${newValue}"`);
+              console.log(
+                `[ParseRevision] Status change: "${oldValue}" -> "${newValue}"`
+              );
             }
           }
         }
         // Skip all other field types
         else {
-          // Silently skip - not a field we're tracking
           continue;
         }
 
-        // Only include if we successfully identified and extracted values
+        // Only include if we successfully extracted values
         if (
           (columnType === "assignee" || columnType === "status") &&
           (oldValue || newValue)
@@ -966,7 +1026,7 @@ export class ScrapingService {
           const userName =
             activity.user?.name || activity.user?.email || "Unknown";
 
-          // Format exactly as specified in requirements
+          // Format as specified in requirements
           const revision = {
             uuid:
               activity.id ||
@@ -981,24 +1041,34 @@ export class ScrapingService {
             authoredBy: userName,
           };
 
-          console.log(`✅ Tracked ${columnType} change by ${userName}`);
+          console.log(
+            `[ParseRevision] Tracked ${columnType} change by ${userName}`
+          );
           revisions.push(revision);
         }
       } catch (error) {
-        console.error("Error parsing activity:", error);
+        console.error("[ParseRevision] Error parsing activity:", error);
       }
     }
 
     if (revisions.length > 0) {
-      console.log(`📝 Total tracked changes: ${revisions.length}`);
+      console.log(`[ParseRevision] Total tracked changes: ${revisions.length}`);
     }
 
     return revisions;
   }
 
   /**
-   * Fetch revision history for all pages (up to 200)
-   * Processes in batches to avoid rate limiting
+   * Fetch revision history for multiple pages in batches
+   *
+   * Processes up to 200 pages with:
+   * - Configurable batch size (concurrent requests)
+   * - Progress tracking via callback
+   * - Rate limiting between batches
+   * - Error handling and retry logic
+   *
+   * @param batchSize - Number of concurrent requests (default: 5)
+   * @param progressCallback - Optional callback for progress updates
    */
   async fetchAllRevisionHistory(
     batchSize: number = 5,
@@ -1012,8 +1082,10 @@ export class ScrapingService {
       const pages = await Page.find().limit(200);
       const totalPages = pages.length;
 
-      console.log(`📦 Starting revision history fetch for ${totalPages} pages`);
-      console.log(`📊 Batch size: ${batchSize}`);
+      console.log(
+        `[FetchAllRevisions] Starting batch fetch for ${totalPages} pages`
+      );
+      console.log(`[FetchAllRevisions] Batch size: ${batchSize}`);
 
       let processed = 0;
       let withHistory = 0;
@@ -1027,7 +1099,7 @@ export class ScrapingService {
         const totalBatches = Math.ceil(pages.length / batchSize);
 
         console.log(
-          `\n📊 Batch ${batchNumber}/${totalBatches} (${batch.length} pages)`
+          `[FetchAllRevisions] Processing batch ${batchNumber}/${totalBatches} (${batch.length} pages)`
         );
 
         // Process batch in parallel
@@ -1064,7 +1136,7 @@ export class ScrapingService {
               }
             } catch (error: any) {
               if (error.message === "COOKIES_EXPIRED") {
-                throw error; // Propagate to stop batch processing
+                throw error; // Propagate to stop processing
               }
               return {
                 success: false,
@@ -1089,7 +1161,9 @@ export class ScrapingService {
               }
             } else {
               errors++;
-              console.error(`❌ Error on ${value.pageId}: ${value.error}`);
+              console.error(
+                `[FetchAllRevisions] Error on ${value.pageId}: ${value.error}`
+              );
             }
           } else {
             errors++;
@@ -1111,13 +1185,13 @@ export class ScrapingService {
         };
 
         console.log(
-          `📈 Progress: ${progress.percentage}% | ` +
+          `[FetchAllRevisions] Progress: ${progress.percentage}% | ` +
             `With history: ${withHistory} | ` +
             `No history: ${withoutHistory} | ` +
             `Errors: ${errors}`
         );
 
-        // Call progress callback if provided
+        // Call progress callback
         if (progressCallback) {
           progressCallback(progress);
         }
@@ -1125,19 +1199,25 @@ export class ScrapingService {
         // Rate limiting between batches
         if (i + batchSize < pages.length) {
           const delayTime = this.requestDelay + Math.random() * 500;
-          console.log(`⏳ Waiting ${delayTime}ms before next batch...`);
+          console.log(
+            `[FetchAllRevisions] Waiting ${delayTime}ms before next batch...`
+          );
           await this.delay(delayTime);
         }
       }
 
-      console.log("\n🎉 Revision history fetch completed!");
-      console.log(`📊 Final Stats:`);
-      console.log(`   ✅ Pages with history: ${withHistory}`);
-      console.log(`   ⚠️  Pages without history: ${withoutHistory}`);
-      console.log(`   ❌ Errors: ${errors}`);
-      console.log(`   📦 Total processed: ${processed}/${totalPages}`);
+      console.log("[FetchAllRevisions] Batch fetch completed successfully");
+      console.log(`[FetchAllRevisions] Final Stats:`);
+      console.log(`[FetchAllRevisions]   Pages with history: ${withHistory}`);
+      console.log(
+        `[FetchAllRevisions]   Pages without history: ${withoutHistory}`
+      );
+      console.log(`[FetchAllRevisions]   Errors: ${errors}`);
+      console.log(
+        `[FetchAllRevisions]   Total processed: ${processed}/${totalPages}`
+      );
     } catch (error: any) {
-      console.error("❌ Fatal error:", error.message);
+      console.error("[FetchAllRevisions] Fatal error:", error.message);
       throw error;
     }
   }
