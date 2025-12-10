@@ -345,4 +345,34 @@ router.get("/stats", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Get current authenticated user info
+ * GET /api/airtable/whoami
+ */
+router.get("/whoami", async (req: Request, res: Response) => {
+  try {
+    const accessToken = await getAccessToken();
+
+    if (!accessToken) {
+      return res.status(401).json({
+        error: "Not authenticated or token expired",
+      });
+    }
+
+    const service = new AirtableService(accessToken);
+    const user = await service.getCurrentUser();
+
+    res.json({
+      success: true,
+      user,
+    });
+  } catch (error: any) {
+    console.error("Error fetching current user:", error.message);
+    res.status(500).json({
+      error: "Failed to fetch current user",
+      message: error.message,
+    });
+  }
+});
+
 export default router;
