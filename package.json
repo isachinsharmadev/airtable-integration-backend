@@ -18,7 +18,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "airtable": "^0.12.2",
     "axios": "^1.6.2",
+    "bottleneck": "^2.19.5",
     "cheerio": "^1.0.0-rc.12",
     "connect-mongo": "^5.1.0",
     "cors": "^2.8.5",

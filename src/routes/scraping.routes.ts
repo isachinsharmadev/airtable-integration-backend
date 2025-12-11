@@ -6,11 +6,6 @@ const router = Router();
 
 const activeJobs = new Map<string, any>();
 
-/**
- * Check if a job has stalled (no activity for 30 minutes)
- * @param job - Job object to check
- * @returns true if job is stalled
- */
 function isJobStalled(job: any): boolean {
   if (job.status === "completed" || job.status === "failed") {
     return false;
@@ -24,7 +19,6 @@ router.post("/authenticate", async (req: Request, res: Response) => {
   try {
     const { email, password, mfaCode, debugMode = false } = req.body;
 
-    // Validate required fields
     if (!email || !password) {
       return res.status(400).json({
         success: false,
@@ -39,7 +33,6 @@ router.post("/authenticate", async (req: Request, res: Response) => {
     console.log(`   MFA Code: ${mfaCode ? "Provided" : "Not provided"}`);
     console.log(`   Debug Mode: ${debugMode}`);
 
-    // Authenticate and get cookies
     const cookies = await service.authenticateAndGetCookies(
       email,
       password,
@@ -47,7 +40,6 @@ router.post("/authenticate", async (req: Request, res: Response) => {
       debugMode
     );
 
-    // Validate cookies immediately
     const isValid = await service.validateCookies(cookies);
 
     console.log(" Authentication successful");
@@ -64,7 +56,6 @@ router.post("/authenticate", async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error(" Authentication error:", error.message);
 
-    // Handle MFA requirement
     if (error.message === "MFA_CODE_REQUIRED") {
       return res.status(400).json({
         success: false,
@@ -74,7 +65,6 @@ router.post("/authenticate", async (req: Request, res: Response) => {
       });
     }
 
-    // Generic error response
     res.status(500).json({
       success: false,
       error: "Authentication failed",
@@ -181,20 +171,19 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
   try {
     const { batchSize = 5, force = false } = req.body;
 
-    // Check for existing active job
     const existingJob = activeJobs.get("revision-fetch");
 
     if (existingJob) {
-      // Allow restart if job is completed or failed
       if (
         existingJob.status === "completed" ||
         existingJob.status === "failed"
       ) {
         console.log("Previous job completed, starting new run");
         activeJobs.delete("revision-fetch");
-      }
-      // Block if job is running (unless force=true)
-      else if (existingJob.status === "running" && !isJobStalled(existingJob)) {
+      } else if (
+        existingJob.status === "running" &&
+        !isJobStalled(existingJob)
+      ) {
         if (!force) {
           return res.status(409).json({
             success: false,
@@ -214,15 +203,12 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
         }
         console.log(" Force restarting job");
         activeJobs.delete("revision-fetch");
-      }
-      // Clean up stalled jobs
-      else if (isJobStalled(existingJob)) {
+      } else if (isJobStalled(existingJob)) {
         console.warn("  Removing stalled job");
         activeJobs.delete("revision-fetch");
       }
     }
 
-    // Verify cookies before starting
     const service = new ScrapingService();
     try {
       await service.getOrExtractCookies();
@@ -237,11 +223,11 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
 
     // Get page count (limit 200 as per requirements)
     const pageCount = await Page.countDocuments();
-    const pagesToProcess = Math.min(pageCount, 200);
+    // const pagesToProcess = Math.min(pageCount, 200);
 
     console.log(" Starting revision history fetch");
     console.log(`   Total pages in DB: ${pageCount}`);
-    console.log(`   Pages to process: ${pagesToProcess}`);
+    console.log(`   Pages to process: ${pageCount}`);
     console.log(`   Batch size: ${batchSize}`);
 
     // Create job tracking
@@ -251,7 +237,7 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
       startTime: new Date(),
       lastActivityTime: new Date(),
       status: "running",
-      totalPages: pagesToProcess,
+      totalPages: pageCount,
       processed: 0,
       withHistory: 0,
       withoutHistory: 0,
@@ -302,7 +288,7 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
       success: true,
       message: "Revision history fetch started",
       jobId: jobId,
-      totalPages: pagesToProcess,
+      totalPages: pageCount,
       batchSize: batchSize,
       note: "Check progress at GET /api/scraping/job-status/revision-fetch",
       timestamp: new Date().toISOString(),
@@ -323,7 +309,7 @@ router.get("/revision-histories", async (req: Request, res: Response) => {
       pageId,
       baseId,
       tableId,
-      limit = 200,
+      limit = 1000,
       includeStats = "true",
     } = req.query;
 

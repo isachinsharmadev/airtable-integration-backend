@@ -1,20 +1,3 @@
-/**
- * OAuth Authentication Routes - Airtable OAuth 2.0 with PKCE
- *
- * This module handles the complete OAuth 2.0 authorization flow with Airtable:
- * - Authorization URL generation with PKCE (Proof Key for Code Exchange)
- * - OAuth callback handling and token exchange
- * - Token refresh management
- * - Session management
- *
- * Security Features:
- * - PKCE flow prevents authorization code interception
- * - State parameter prevents CSRF attacks
- * - Secure token storage in MongoDB
- *
- * @module routes/airtable-auth.routes
- */
-
 import { Router, Request, Response } from "express";
 import axios from "axios";
 import { OAuthToken } from "../models/airtable.model";
@@ -24,22 +7,18 @@ import dotenv from "dotenv";
 dotenv.config();
 const router = Router();
 
-// Extend Express session to include access token
 declare module "express-session" {
   interface SessionData {
     accessToken?: string;
   }
 }
 
-// Environment configuration
 const AIRTABLE_CLIENT_ID = process.env.AIRTABLE_CLIENT_ID || "";
 const AIRTABLE_CLIENT_SECRET = process.env.AIRTABLE_CLIENT_SECRET || "";
 const REDIRECT_URI =
   process.env.REDIRECT_URI || "http://localhost:3000/api/auth/callback";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:4200";
 
-// In-memory store for PKCE code verifiers
-// NOTE: In production, use Redis or similar distributed cache
 const codeVerifierStore = new Map<string, string>();
 
 /**
@@ -89,13 +68,10 @@ router.get("/authorize", (req: Request, res: Response) => {
   try {
     console.log("[Authorize] Starting OAuth authorization flow");
 
-    // Generate PKCE values
     const { verifier, challenge } = generatePKCE();
 
-    // Generate state for CSRF protection
     const state = crypto.randomBytes(16).toString("base64url");
 
-    // Store verifier temporarily (indexed by state)
     codeVerifierStore.set(state, verifier);
 
     console.log("[Authorize] Generated PKCE parameters");
@@ -104,7 +80,6 @@ router.get("/authorize", (req: Request, res: Response) => {
       `[Authorize]   Code Challenge: ${challenge.substring(0, 20)}...`
     );
 
-    // Clean up old verifiers after 10 minutes
     setTimeout(() => {
       codeVerifierStore.delete(state);
       console.log(
@@ -112,7 +87,6 @@ router.get("/authorize", (req: Request, res: Response) => {
       );
     }, 10 * 60 * 1000);
 
-    // Build authorization URL using official Airtable OAuth format
     const authUrl = new URL("https://airtable.com/oauth2/v1/authorize");
     authUrl.searchParams.set("client_id", AIRTABLE_CLIENT_ID);
     authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
@@ -121,11 +95,11 @@ router.get("/authorize", (req: Request, res: Response) => {
     authUrl.searchParams.set("code_challenge", challenge);
     authUrl.searchParams.set("code_challenge_method", "S256");
 
-    // Scopes - space separated as per OAuth 2.0 spec
     const scopes = [
       "data.records:read",
       "data.recordComments:read",
       "schema.bases:read",
+      "user.email:read",
     ].join(" ");
     authUrl.searchParams.set("scope", scopes);
 
@@ -135,7 +109,7 @@ router.get("/authorize", (req: Request, res: Response) => {
 
     res.json({
       authUrl: authUrl.toString(),
-      state, // Send state to frontend for verification
+      state,
     });
   } catch (error: any) {
     console.error(
@@ -284,20 +258,6 @@ router.get("/callback", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/auth/refresh
- *
- * Refresh an expired OAuth access token
- *
- * Uses the refresh token to obtain a new access token without
- * requiring the user to re-authenticate.
- *
- * Response:
- * {
- *   success: true,
- *   accessToken: "new_access_token"
- * }
- */
 router.post("/refresh", async (req: Request, res: Response) => {
   try {
     console.log("[Refresh] Starting token refresh...");
@@ -337,7 +297,6 @@ router.post("/refresh", async (req: Request, res: Response) => {
     console.log(`[Refresh]   Expires in: ${expires_in} seconds`);
     console.log(`[Refresh]   Expires at: ${expiresAt.toISOString()}`);
 
-    // Update database
     await OAuthToken.findByIdAndUpdate(token._id, {
       accessToken: access_token,
       refreshToken: refresh_token || token.refreshToken,
@@ -347,7 +306,6 @@ router.post("/refresh", async (req: Request, res: Response) => {
 
     console.log("[Refresh] Token updated in database");
 
-    // Update session
     if (req.session) {
       req.session.accessToken = access_token;
       console.log("[Refresh] Token updated in session");
@@ -364,21 +322,6 @@ router.post("/refresh", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/auth/status
- *
- * Get current authentication status
- *
- * Checks if user has a valid OAuth token and whether it's expired.
- *
- * Response:
- * {
- *   authenticated: true/false,
- *   expired: true/false,
- *   expiresAt: "2024-12-31T23:59:59.000Z",
- *   hasToken: true/false
- * }
- */
 router.get("/status", async (req: Request, res: Response) => {
   try {
     const token = await OAuthToken.findOne().sort({ updatedAt: -1 });
@@ -410,27 +353,13 @@ router.get("/status", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/auth/logout
- *
- * Log out user and clear tokens
- *
- * Deletes OAuth tokens from database and destroys session.
- *
- * Response:
- * {
- *   success: true
- * }
- */
 router.post("/logout", async (req: Request, res: Response) => {
   try {
     console.log("[Logout] Logging out user...");
 
-    // Delete tokens from database
     await OAuthToken.deleteMany({});
     console.log("[Logout] Tokens deleted from database");
 
-    // Destroy session
     if (req.session) {
       req.session.destroy((err) => {
         if (err) {

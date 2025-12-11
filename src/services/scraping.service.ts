@@ -32,10 +32,6 @@ export class ScrapingService {
     console.log("[StoreCookies] Cookies stored in database");
   }
 
-  /**
-   * Get stored cookies from database
-   * @returns Cookie string or null if not found
-   */
   async getStoredCookies(): Promise<string | null> {
     try {
       const cookieStore = await CookieStore.findOne().sort({ updatedAt: -1 });
@@ -46,16 +42,10 @@ export class ScrapingService {
     }
   }
 
-  /**
-   * Get cookies with automatic validation
-   * Throws error if no valid cookies available
-   * @returns Valid cookie string
-   */
   async getOrExtractCookies(): Promise<string> {
     const cookieStore = await CookieStore.findOne().sort({ updatedAt: -1 });
 
     if (cookieStore && cookieStore.isValid) {
-      // Check if cookies were validated recently (within 5 minutes)
       const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
 
       if (cookieStore.lastValidated > fiveMinutesAgo) {
@@ -65,7 +55,6 @@ export class ScrapingService {
         return cookieStore.cookies;
       }
 
-      // Re-validate if older than 5 minutes
       console.log("[GetOrExtractCookies] Re-validating cached cookies...");
       const isValid = await this.validateCookies(cookieStore.cookies);
 
@@ -81,11 +70,6 @@ export class ScrapingService {
     );
   }
 
-  /**
-   * Validate cookies by testing against Airtable endpoints
-   * @param cookies - Cookie string to validate
-   * @returns true if cookies are valid
-   */
   async validateCookies(cookies: string): Promise<boolean> {
     try {
       console.log("[ValidateCookies] Starting validation...");
@@ -191,13 +175,7 @@ export class ScrapingService {
     }
   }
 
-  /**
-   * Initialize Puppeteer browser with anti-detection settings
-   * @param debugMode - Show browser window (default: false)
-   * @returns Browser instance
-   */
   private async initBrowser(debugMode: boolean = false): Promise<Browser> {
-    // Reuse existing browser if still connected
     if (this.browser && this.browser.isConnected()) {
       return this.browser;
     }
@@ -232,9 +210,6 @@ export class ScrapingService {
     return this.browser;
   }
 
-  /**
-   * Close browser instance safely
-   */
   async closeBrowser(): Promise<void> {
     if (this.browser) {
       try {
@@ -247,20 +222,13 @@ export class ScrapingService {
     }
   }
 
-  /**
-   * Create new page with anti-detection headers and settings
-   * @param browser - Browser instance
-   * @returns Configured page
-   */
   private async createStealthPage(browser: Browser): Promise<PuppeteerPage> {
     const page = await browser.newPage();
 
-    // Set realistic user agent
     await page.setUserAgent(
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
-    // Set realistic headers
     await page.setExtraHTTPHeaders({
       "Accept-Language": "en-US,en;q=0.9",
       "Accept-Encoding": "gzip, deflate, br",
@@ -284,21 +252,10 @@ export class ScrapingService {
     return page;
   }
 
-  /**
-   * Wait for specified milliseconds
-   * @param ms - Milliseconds to wait
-   */
   private async wait(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  /**
-   * Wait for selector with timeout and error handling
-   * @param page - Puppeteer page
-   * @param selector - CSS selector to wait for
-   * @param options - Wait options
-   * @returns true if element found, false otherwise
-   */
   private async waitForSelectorSafe(
     page: PuppeteerPage,
     selector: string,
@@ -317,12 +274,6 @@ export class ScrapingService {
     }
   }
 
-  /**
-   * Type text with human-like delays to avoid detection
-   * @param page - Puppeteer page
-   * @param selector - CSS selector of input field
-   * @param text - Text to type
-   */
   private async typeHuman(
     page: PuppeteerPage,
     selector: string,
@@ -332,7 +283,6 @@ export class ScrapingService {
     await page.click(selector);
     await this.wait(500 + Math.random() * 500);
 
-    // Type character by character with random delays
     for (const char of text) {
       await page.keyboard.type(char, { delay: 50 + Math.random() * 100 });
     }
@@ -340,13 +290,26 @@ export class ScrapingService {
     await this.wait(300 + Math.random() * 300);
   }
 
-  /**
-   * Delay helper for rate limiting
-   * @param ms - Milliseconds to delay
-   */
+  private async typeFast(
+    page: PuppeteerPage,
+    selector: string,
+    text: string
+  ): Promise<void> {
+    await page.waitForSelector(selector, { visible: true });
+    await page.click(selector);
+    await this.wait(100);
+
+    for (const char of text) {
+      await page.keyboard.type(char, { delay: 20 });
+    }
+
+    await this.wait(100);
+  }
+
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+
   async authenticateAndGetCookies(
     email: string,
     password: string,
@@ -364,24 +327,23 @@ export class ScrapingService {
         `[Authenticate] MFA Code: ${mfaCode ? "Provided" : "Not provided"}`
       );
 
-      // Initialize browser
+      const authStartTime = Date.now();
+
       browser = await this.initBrowser(debugMode);
       page = await this.createStealthPage(browser);
 
-      // Navigate to login page
       console.log("[Authenticate] Navigating to login page...");
       await page.goto(`${this.airtableBaseUrl}/login`, {
-        waitUntil: "networkidle0",
+        waitUntil: "domcontentloaded", // Changed from networkidle0 for speed
         timeout: 60000,
       });
 
-      await this.wait(2000 + Math.random() * 1000);
+      await this.wait(500);
 
       if (debugMode) {
         await page.screenshot({ path: "step1-login-page.png" });
       }
 
-      // STEP 1: Fill email
       console.log("[Authenticate] Step 1: Entering email...");
       const emailSelectors = [
         'input[type="email"]',
@@ -404,9 +366,6 @@ export class ScrapingService {
         throw new Error("Could not find email input field");
       }
 
-      await this.wait(1000);
-
-      // Click continue button
       console.log("[Authenticate] Clicking continue button...");
       const continueSelectors = [
         'button[type="submit"]',
@@ -434,13 +393,12 @@ export class ScrapingService {
         }
       }
 
-      await this.wait(2000 + Math.random() * 1000);
+      await this.wait(1000);
 
       if (debugMode) {
         await page.screenshot({ path: "step2-after-email.png" });
       }
 
-      // STEP 2: Fill password
       console.log("[Authenticate] Step 2: Entering password...");
       const passwordSelectors = [
         'input[type="password"]',
@@ -465,9 +423,6 @@ export class ScrapingService {
         throw new Error("Could not find password input field");
       }
 
-      await this.wait(1000);
-
-      // Submit login
       console.log("[Authenticate] Submitting login form...");
       const submitSelectors = [
         'button[type="submit"]',
@@ -495,14 +450,18 @@ export class ScrapingService {
         }
       }
 
-      await this.wait(3000 + Math.random() * 1000);
+      await this.wait(1500);
 
       if (debugMode) {
         await page.screenshot({ path: "step3-after-password.png" });
       }
 
-      // STEP 3: Check for MFA requirement
       console.log("[Authenticate] Step 3: Checking for MFA requirement...");
+
+      const mfaCheckTime = Date.now();
+      const timeToMFA = ((mfaCheckTime - authStartTime) / 1000).toFixed(2);
+      console.log(`[Authenticate] Time to reach MFA check: ${timeToMFA}s`);
+
       const mfaSelectors = [
         'input[name="code"]',
         'input[name="authCode"]',
@@ -523,7 +482,6 @@ export class ScrapingService {
         }
       }
 
-      // Handle MFA if required
       if (mfaInput) {
         if (!mfaCode) {
           console.log("[Authenticate] MFA code required but not provided");
@@ -533,58 +491,133 @@ export class ScrapingService {
           throw new Error("MFA_CODE_REQUIRED");
         }
 
+        const timeElapsed = ((Date.now() - authStartTime) / 1000).toFixed(2);
+        console.log(
+          `[Authenticate] Entering MFA code (${timeElapsed}s elapsed since start)`
+        );
+
+        if (parseFloat(timeElapsed) > 20) {
+          console.warn(
+            `[Authenticate] WARNING: Already ${timeElapsed}s elapsed - MFA might expire!`
+          );
+          console.warn(
+            "[Authenticate] MFA codes typically expire in 30 seconds"
+          );
+        }
+
         console.log("[Authenticate] Entering MFA code...");
 
         for (const selector of mfaSelectors) {
           if (await page.$(selector)) {
-            await this.typeHuman(page, selector, mfaCode);
-            console.log("[Authenticate] MFA code entered");
+            // Use fast typing for MFA - codes expire in 30 seconds!
+            await this.typeFast(page, selector, mfaCode);
+            console.log("[Authenticate] MFA code entered successfully");
+
+            console.log("[Authenticate] Pressing Enter to submit...");
+            await page.keyboard.press("Enter");
+            await this.wait(500);
+
             break;
           }
         }
 
-        await this.wait(1000);
+        await this.wait(300);
 
-        // Submit MFA
         console.log("[Authenticate] Submitting MFA code...");
         const mfaSubmitSelectors = [
+          "div.link-quiet.rounded.py1.px2",
+          'div[class*="link-quiet"][class*="rounded"]',
           'button[type="submit"]',
           'button:has-text("Verify")',
           'button:has-text("Continue")',
+          'div:has-text("Submit")',
         ];
 
+        let mfaSubmitted = false;
         for (const selector of mfaSubmitSelectors) {
           try {
             const element = await page.$(selector);
             if (element) {
-              await Promise.all([
-                page
-                  .waitForNavigation({
-                    waitUntil: "networkidle0",
-                    timeout: 30000,
-                  })
-                  .catch(() => {}),
-                element.click(),
-              ]);
+              console.log(
+                `[Authenticate] Found MFA submit element with selector: ${selector}`
+              );
+              console.log("[Authenticate] Clicking MFA submit button...");
+
+              try {
+                await element.click();
+                console.log("[Authenticate] Click method 1: Regular click");
+              } catch (clickError) {
+                try {
+                  await page.evaluate((el: any) => el.click(), element);
+                  console.log(
+                    "[Authenticate] Click method 2: JavaScript click"
+                  );
+                } catch (jsClickError) {
+                  await page.$eval(selector, (el: any) => el.click());
+                  console.log("[Authenticate] Click method 3: Evaluate click");
+                }
+              }
+
+              try {
+                await page.waitForNavigation({
+                  waitUntil: "networkidle2",
+                  timeout: 30000,
+                });
+                console.log("[Authenticate] Navigation completed after MFA");
+              } catch (navError) {
+                const currentUrl = page.url();
+                if (!currentUrl.includes("/2fa/")) {
+                  console.log(
+                    "[Authenticate] MFA verification successful (left 2FA page)"
+                  );
+                } else {
+                  console.log(
+                    "[Authenticate] Still on 2FA page - navigation wait timed out"
+                  );
+                  console.log(`[Authenticate] Current URL: ${currentUrl}`);
+                }
+              }
+
+              mfaSubmitted = true;
+              console.log("[Authenticate] MFA code submitted successfully");
               break;
             }
-          } catch (e) {
+          } catch (e: any) {
+            console.log(
+              `[Authenticate] Selector ${selector} failed: ${e.message}`
+            );
             continue;
           }
         }
 
-        await this.wait(3000);
+        if (!mfaSubmitted) {
+          console.warn(
+            "[Authenticate] Warning: Could not find MFA submit button"
+          );
+        }
+
+        console.log(
+          "[Authenticate] Waiting for MFA verification and session upgrade..."
+        );
+        await this.wait(5000);
 
         if (debugMode) {
           await page.screenshot({ path: "step5-after-mfa.png" });
         }
+
+        console.log(
+          "[Authenticate] Waiting for session to stabilize after MFA..."
+        );
+        await this.wait(2000);
+      } else {
+        console.log(
+          "[Authenticate] No MFA required - proceeding to verify login"
+        );
       }
 
-      // STEP 4: Verify login success
       const currentUrl = page.url();
       console.log(`[Authenticate] Current URL: ${currentUrl}`);
 
-      // Check if still on login page (would indicate login failure)
       const isStillOnLogin =
         currentUrl.includes("/login") ||
         currentUrl.includes("/signin") ||
@@ -600,7 +633,6 @@ export class ScrapingService {
         );
       }
 
-      // Verify we're on Airtable domain
       if (!currentUrl.includes("airtable.com")) {
         console.error(
           "[Authenticate] Unexpected redirect - not on Airtable domain"
@@ -616,9 +648,16 @@ export class ScrapingService {
         await page.screenshot({ path: "step7-logged-in.png" });
       }
 
-      // STEP 5: Extract cookies
       console.log("[Authenticate] Extracting cookies...");
-      await this.wait(2000); // Wait for cookies to be fully set
+
+      if (mfaIsRequired) {
+        console.log(
+          "[Authenticate] MFA was required - waiting extra time for session cookies..."
+        );
+        await this.wait(3000);
+      } else {
+        await this.wait(2000);
+      }
 
       const cookies = await page.cookies();
 
@@ -626,7 +665,6 @@ export class ScrapingService {
         throw new Error("No cookies retrieved after login");
       }
 
-      // Convert to cookie string
       const cookieString = cookies
         .map((c) => `${c.name}=${c.value}`)
         .join("; ");
@@ -635,32 +673,136 @@ export class ScrapingService {
       console.log(
         `[Authenticate] Cookie names: ${cookies.map((c) => c.name).join(", ")}`
       );
+      console.log(
+        `[Authenticate] Cookie string length: ${cookieString.length} characters`
+      );
 
-      // Store in database
+      if (mfaIsRequired) {
+        const sessionCookie = cookies.find(
+          (c) => c.name === "__Host-airtable-session"
+        );
+        if (sessionCookie) {
+          try {
+            const sessionData = JSON.parse(
+              Buffer.from(sessionCookie.value, "base64").toString()
+            );
+            console.log(
+              "[Authenticate] Session data keys:",
+              Object.keys(sessionData).join(", ")
+            );
+
+            if (sessionData.userIdPending2fa) {
+              console.error(
+                "[Authenticate] ERROR: Session still shows 'userIdPending2fa'!"
+              );
+              console.error(
+                "[Authenticate] MFA verification did NOT complete successfully"
+              );
+              throw new Error(
+                "MFA verification incomplete! Session still in pending state. " +
+                  "This usually means: (1) MFA code was incorrect, or (2) Not enough wait time after submission. " +
+                  "Please verify your MFA code and try again."
+              );
+            }
+
+            if (sessionData.userId && sessionData.loggedInTime) {
+              console.log("[Authenticate] ✓✓✓ FULL LOGIN CONFIRMED ✓✓✓");
+              console.log(`[Authenticate]   userId: ${sessionData.userId}`);
+              console.log(
+                `[Authenticate]   loggedInTime: ${sessionData.loggedInTime}`
+              );
+            } else if (sessionData.userId) {
+              console.log(
+                "[Authenticate] ✓ userId present but no loggedInTime"
+              );
+            } else {
+              console.warn(
+                "[Authenticate] Warning: Session structure unexpected"
+              );
+            }
+          } catch (parseError: any) {
+            if (parseError.message?.includes("MFA verification incomplete")) {
+              throw parseError; // Re-throw MFA errors
+            }
+            console.log(
+              "[Authenticate] Could not parse session cookie:",
+              parseError.message
+            );
+          }
+        } else {
+          console.warn(
+            "[Authenticate] Warning: __Host-airtable-session cookie not found!"
+          );
+        }
+      }
+
+      const cookieNames = cookies.map((c) => c.name);
+      const hasSessionCookie = cookieNames.some(
+        (name) =>
+          name.toLowerCase().includes("session") ||
+          name.toLowerCase().includes("auth") ||
+          name === "brw" // Common Airtable session cookie
+      );
+
+      if (!hasSessionCookie) {
+        console.warn(
+          "[Authenticate] Warning: No obvious session/auth cookies found"
+        );
+        console.warn("[Authenticate] This might cause authentication issues");
+      } else {
+        console.log("[Authenticate] Session cookies verified ✓");
+      }
+
       await this.storeCookies(cookieString, mfaIsRequired);
 
-      // Close browser unless in debug mode
+      console.log("[Authenticate] Authentication complete - cookies stored");
+
+      if (mfaIsRequired) {
+        console.log(
+          "[Authenticate] Testing cookies immediately after MFA authentication..."
+        );
+        try {
+          await axios.get(`${this.airtableBaseUrl}/`, {
+            headers: {
+              Cookie: cookieString,
+              "User-Agent":
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            },
+            timeout: 10000,
+          });
+          console.log("[Authenticate] Cookie validation test passed ✓");
+        } catch (testError: any) {
+          console.error(
+            "[Authenticate] Warning: Cookie validation test failed:",
+            testError.message
+          );
+          console.error("[Authenticate] Cookies may not be working properly");
+          if (
+            testError.response?.status === 401 ||
+            testError.response?.status === 403
+          ) {
+            throw new Error(
+              "Cookies authentication failed immediately after login. Please try again."
+            );
+          }
+        }
+      }
+
       if (!debugMode) {
         await this.closeBrowser();
       }
-
-      console.log("[Authenticate] Authentication complete - cookies stored");
 
       return cookieString;
     } catch (error: any) {
       console.error("[Authenticate] Authentication failed:", error.message);
 
-      // Save error screenshot if possible
       if (page) {
         try {
           await page.screenshot({ path: "error-screenshot.png" });
           console.log("[Authenticate] Error screenshot saved");
-        } catch (e) {
-          // Ignore screenshot errors
-        }
+        } catch (e) {}
       }
 
-      // Close browser on error (unless debug mode)
       if (!debugMode && browser) {
         await this.closeBrowser();
       }
@@ -669,19 +811,6 @@ export class ScrapingService {
     }
   }
 
-  /**
-   * Fetch revision history for a single record
-   *
-   * Uses Airtable's internal /readRowActivitiesAndComments endpoint
-   * with stored cookies for authentication.
-   *
-   * @param baseId - Airtable base ID
-   * @param tableId - Airtable table ID
-   * @param recordId - Airtable record ID
-   * @param cookies - Cookie string for authentication
-   * @param retryCount - Current retry attempt (for rate limiting)
-   * @returns Array of parsed revision history items
-   */
   async fetchRevisionHistory(
     baseId: string,
     tableId: string,
@@ -694,7 +823,6 @@ export class ScrapingService {
         `[FetchRevision] Fetching revision history for record: ${recordId}`
       );
 
-      // Build query parameters
       const stringifiedObjectParams = JSON.stringify({
         limit: 100,
         offsetV2: null,
@@ -702,7 +830,6 @@ export class ScrapingService {
         shouldIncludeRowActivityOrCommentUserObjById: true,
       });
 
-      // Generate unique IDs for tracking
       const requestId = `req${Math.random().toString(36).substring(2, 15)}`;
       const secretSocketId = `soc${Math.random()
         .toString(36)
@@ -712,7 +839,6 @@ export class ScrapingService {
       // Build request URL
       const url = `${this.airtableBaseUrl}/v0.3/row/${recordId}/readRowActivitiesAndComments`;
 
-      // Make request
       const response = await axios.get(url, {
         params: {
           stringifiedObjectParams,
@@ -745,7 +871,6 @@ export class ScrapingService {
         timeout: 30000,
       });
 
-      // Parse response
       if (response.data && response.data.data) {
         const data = response.data.data;
 
@@ -754,7 +879,6 @@ export class ScrapingService {
           `[FetchRevision] Response has: ${Object.keys(data).join(", ")}`
         );
 
-        // Parse row activities
         if (data.rowActivityInfoById) {
           const activityIds = Object.keys(data.rowActivityInfoById);
           console.log(`[FetchRevision] Found ${activityIds.length} activities`);
@@ -801,7 +925,6 @@ export class ScrapingService {
         }
       }
 
-      // Fallback: Check old response format
       if (response.data && response.data.activities) {
         console.log(
           `[FetchRevision] Found ${response.data.activities.length} activities (old format)`
@@ -828,11 +951,9 @@ export class ScrapingService {
       );
       return [];
     } catch (error: any) {
-      // Handle HTTP errors
       if (error.response) {
         const status = error.response.status;
 
-        // 404 = no revision history exists (normal, not an error)
         if (status === 404) {
           console.log(
             `[FetchRevision] No revision history for ${recordId} (404)`
@@ -840,14 +961,12 @@ export class ScrapingService {
           return [];
         }
 
-        // 401/403 = cookies expired
         if ([401, 403].includes(status)) {
           console.log("[FetchRevision] Cookies expired, marking invalid");
           await CookieStore.findOneAndUpdate({}, { isValid: false });
           throw new Error("COOKIES_EXPIRED");
         }
 
-        // 429 = rate limited, retry with exponential backoff
         if (status === 429 && retryCount < this.maxRetries) {
           const waitTime = Math.pow(2, retryCount) * 1000;
           console.log(
@@ -864,7 +983,6 @@ export class ScrapingService {
           );
         }
 
-        // 400 = bad request
         if (status === 400) {
           console.error(
             `[FetchRevision] Bad request for ${recordId}:`,
@@ -873,7 +991,6 @@ export class ScrapingService {
         }
       }
 
-      // Log other errors (except 404)
       if (error.response?.status !== 404) {
         console.error(
           `[FetchRevision] Error fetching revision for ${recordId}:`,
@@ -887,22 +1004,6 @@ export class ScrapingService {
       throw error;
     }
   }
-
-  /**
-   * Parse revision history HTML to extract assignee and status changes
-   *
-   * Uses Cheerio to parse HTML and extract:
-   * - Field name (assignee, status)
-   * - Old value (red/strikethrough)
-   * - New value (green)
-   * - Metadata (timestamp, user)
-   *
-   * @param activities - Array of activity objects with HTML content
-   * @param pageId - Record ID
-   * @param baseId - Base ID
-   * @param tableId - Table ID
-   * @returns Array of parsed revision objects
-   */
   private parseRevisionHistory(
     activities: any[],
     pageId: string,
@@ -912,25 +1013,20 @@ export class ScrapingService {
     const revisions: any[] = [];
 
     for (const activity of activities) {
-      // Skip if no HTML content
       if (!activity.htmlContent && !activity.diffRowHtml) {
         continue;
       }
 
       try {
-        // Use diffRowHtml if available, otherwise htmlContent
         const htmlContent = activity.diffRowHtml || activity.htmlContent;
 
-        // Load HTML with Cheerio
         const $ = cheerio.load(htmlContent);
 
-        // Extract field name
         const fieldNameElement = $(
           ".historicalCellContainer .micro.strong.caps"
         );
         const fieldName = fieldNameElement.text().trim().toLowerCase();
 
-        // Extract column type attribute
         const columnTypeAttr =
           $(".historicalCellValueContainer").attr("columntypeifunchanged") ||
           "";
@@ -939,7 +1035,6 @@ export class ScrapingService {
         let oldValue = "";
         let newValue = "";
 
-        // Check if it's an assignee field
         if (
           (fieldName.includes("assigned") ||
             fieldName.includes("assignee") ||
@@ -948,7 +1043,6 @@ export class ScrapingService {
         ) {
           columnType = "assignee";
 
-          // Extract choice tokens
           const choiceTokens = $(".choiceToken");
           if (choiceTokens.length > 0) {
             choiceTokens.each((i, elem) => {
@@ -958,12 +1052,9 @@ export class ScrapingService {
                 $elem.find(".truncate-pre").attr("title") ||
                 $elem.find(".truncate-pre").text().trim();
 
-              // Removed value (red/strikethrough)
               if (style.includes("line-through") || style.includes("red")) {
                 oldValue = title;
-              }
-              // Added value (green, no strikethrough)
-              else if (
+              } else if (
                 style.includes("green") &&
                 !style.includes("line-through")
               ) {
@@ -977,12 +1068,12 @@ export class ScrapingService {
               );
             }
           }
-        }
-        // Check if it's a status field
-        else if (fieldName.includes("status") && columnTypeAttr === "select") {
+        } else if (
+          fieldName.includes("status") &&
+          columnTypeAttr === "select"
+        ) {
           columnType = "status";
 
-          // Extract choice tokens
           const choiceTokens = $(".choiceToken");
           if (choiceTokens.length > 0) {
             choiceTokens.each((i, elem) => {
@@ -1011,22 +1102,17 @@ export class ScrapingService {
               );
             }
           }
-        }
-        // Skip all other field types
-        else {
+        } else {
           continue;
         }
 
-        // Only include if we successfully extracted values
         if (
           (columnType === "assignee" || columnType === "status") &&
           (oldValue || newValue)
         ) {
-          // Get user information
           const userName =
             activity.user?.name || activity.user?.email || "Unknown";
 
-          // Format as specified in requirements
           const revision = {
             uuid:
               activity.id ||
@@ -1058,28 +1144,24 @@ export class ScrapingService {
     return revisions;
   }
 
-  /**
-   * Fetch revision history for multiple pages in batches
-   *
-   * Processes up to 200 pages with:
-   * - Configurable batch size (concurrent requests)
-   * - Progress tracking via callback
-   * - Rate limiting between batches
-   * - Error handling and retry logic
-   *
-   * @param batchSize - Number of concurrent requests (default: 5)
-   * @param progressCallback - Optional callback for progress updates
-   */
   async fetchAllRevisionHistory(
     batchSize: number = 5,
     progressCallback?: (progress: any) => void
   ): Promise<void> {
     try {
-      // Get valid cookies
       const cookies = await this.getOrExtractCookies();
 
-      // Get pages from database (limit 200 as per requirements)
-      const pages = await Page.find().limit(200);
+      console.log(
+        "[FetchAllRevisions] Validating cookies before bulk fetch..."
+      );
+      const cookieDoc = await CookieStore.findOne().sort({ updatedAt: -1 });
+      if (cookieDoc && !cookieDoc.isValid) {
+        throw new Error(
+          "Cookies are marked invalid. Please re-authenticate at /authentication"
+        );
+      }
+
+      const pages = await Page.find();
       const totalPages = pages.length;
 
       console.log(
@@ -1217,6 +1299,14 @@ export class ScrapingService {
         `[FetchAllRevisions]   Total processed: ${processed}/${totalPages}`
       );
     } catch (error: any) {
+      if (error.message === "COOKIES_EXPIRED") {
+        console.error(
+          "[FetchAllRevisions] Fatal error: Cookies expired. Please re-authenticate."
+        );
+        throw new Error(
+          "Cookies expired. Please re-authenticate at /authentication with your MFA code."
+        );
+      }
       console.error("[FetchAllRevisions] Fatal error:", error.message);
       throw error;
     }
