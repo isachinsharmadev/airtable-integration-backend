@@ -221,9 +221,7 @@ router.post("/fetch-all-revisions", async (req: Request, res: Response) => {
       });
     }
 
-    // Get page count (limit 200 as per requirements)
     const pageCount = await Page.countDocuments();
-    // const pagesToProcess = Math.min(pageCount, 200);
 
     console.log(" Starting revision history fetch");
     console.log(`   Total pages in DB: ${pageCount}`);

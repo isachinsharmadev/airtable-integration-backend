@@ -1,0 +1,17 @@
+# Server Configuration
+PORT=3000
+NODE_ENV=development
+
+MONGODB_URI=db_url
+SESSION_SECRET=your-super-secret-key-change-this
+
+# Airtable OAuth
+AIRTABLE_CLIENT_ID=add_id_here
+AIRTABLE_CLIENT_SECRET=add_secret_here
+REDIRECT_URI=http://localhost:3000/api/auth/callback
+
+# Frontend URL
+FRONTEND_URL=http://localhost:4200
+
+
+#once updated make it .env as its env now

@@ -21,19 +21,6 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:4200";
 
 const codeVerifierStore = new Map<string, string>();
 
-/**
- * Generate PKCE code verifier and challenge
- *
- * PKCE (Proof Key for Code Exchange) adds security to OAuth flow by:
- * 1. Generating a random verifier
- * 2. Creating a SHA256 hash (challenge) of the verifier
- * 3. Sending challenge with authorization request
- * 4. Sending verifier with token exchange request
- *
- * This prevents authorization code interception attacks.
- *
- * @returns Object with verifier and challenge strings
- */
 function generatePKCE(): { verifier: string; challenge: string } {
   const verifier = crypto.randomBytes(32).toString("base64url");
   const challenge = crypto
@@ -44,26 +31,6 @@ function generatePKCE(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-/**
- * GET /api/auth/authorize
- *
- * Generate OAuth authorization URL with PKCE
- *
- * This endpoint:
- * 1. Generates PKCE verifier and challenge
- * 2. Generates state parameter for CSRF protection
- * 3. Stores verifier temporarily (10 minute expiration)
- * 4. Builds authorization URL with all parameters
- * 5. Returns URL to frontend
- *
- * Frontend should redirect user to this URL to begin OAuth flow.
- *
- * Response:
- * {
- *   authUrl: "https://airtable.com/oauth2/v1/authorize?...",
- *   state: "random_state_value"
- * }
- */
 router.get("/authorize", (req: Request, res: Response) => {
   try {
     console.log("[Authorize] Starting OAuth authorization flow");
@@ -120,25 +87,6 @@ router.get("/authorize", (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/auth/callback
- *
- * OAuth callback endpoint - handles redirect from Airtable
- *
- * This endpoint:
- * 1. Receives authorization code from Airtable
- * 2. Validates state parameter (CSRF protection)
- * 3. Retrieves PKCE verifier from store
- * 4. Exchanges code for access token
- * 5. Saves token to MongoDB
- * 6. Redirects user back to frontend
- *
- * Query Parameters:
- * - code: Authorization code from Airtable
- * - state: CSRF protection token
- * - error: Optional error from Airtable
- * - error_description: Optional error details
- */
 router.get("/callback", async (req: Request, res: Response) => {
   const { code, state, error, error_description } = req.query;
 

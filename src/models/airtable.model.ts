@@ -164,8 +164,8 @@ const PageSchema = new Schema<IPage>(
   }
 );
 
-PageSchema.index({ pageId: 1 }, { unique: true });
-PageSchema.index({ baseId: 1, tableId: 1 });
+PageSchema.index({ baseId: 1, tableId: 1, pageId: 1 }, { unique: true });
+
 PageSchema.index({ updatedAt: -1 });
 
 export interface IRevisionHistoryItem {

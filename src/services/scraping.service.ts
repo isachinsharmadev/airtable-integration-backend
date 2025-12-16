@@ -857,7 +857,7 @@ export class ScrapingService {
           "x-airtable-application-id": baseId,
           "x-airtable-inter-service-client": "webClient",
           "x-airtable-page-load-id": pageLoadId,
-          Referer: `${this.airtableBaseUrl}/${baseId}/${tableId}`,
+          Referer: `${this.airtableBaseUrl}/${baseId}/${tableId}/${recordId}?blocks=hide`,
           Origin: this.airtableBaseUrl,
           "Sec-Fetch-Dest": "empty",
           "Sec-Fetch-Mode": "cors",
@@ -1022,116 +1022,121 @@ export class ScrapingService {
 
         const $ = cheerio.load(htmlContent);
 
-        const fieldNameElement = $(
-          ".historicalCellContainer .micro.strong.caps"
-        );
-        const fieldName = fieldNameElement.text().trim().toLowerCase();
+        // Iterate through each field container
+        $(".historicalCellContainer").each((containerIndex, container) => {
+          const $container = $(container);
 
-        const columnTypeAttr =
-          $(".historicalCellValueContainer").attr("columntypeifunchanged") ||
-          "";
+          // Get field name
+          const fieldNameElement = $container.find(".micro.strong.caps");
+          const fieldName = fieldNameElement.text().trim().toLowerCase();
 
-        let columnType = "";
-        let oldValue = "";
-        let newValue = "";
+          // Get column type
+          const columnTypeAttr =
+            $container
+              .find(".historicalCellValueContainer")
+              .attr("columntypeifunchanged") || "";
 
-        if (
-          (fieldName.includes("assigned") ||
+          let columnType = "";
+          let oldValue = "";
+          let newValue = "";
+
+          // Check if this is an assignee or status field
+          const isAssignee =
+            fieldName.includes("assigned") ||
             fieldName.includes("assignee") ||
-            fieldName.includes("developer")) &&
-          columnTypeAttr === "select"
-        ) {
-          columnType = "assignee";
+            fieldName.includes("developer");
 
-          const choiceTokens = $(".choiceToken");
-          if (choiceTokens.length > 0) {
-            choiceTokens.each((i, elem) => {
-              const $elem = $(elem);
-              const style = $elem.attr("style") || "";
-              const title =
-                $elem.find(".truncate-pre").attr("title") ||
-                $elem.find(".truncate-pre").text().trim();
+          const isStatus = fieldName.includes("status");
 
-              if (style.includes("line-through") || style.includes("red")) {
-                oldValue = title;
-              } else if (
-                style.includes("green") &&
-                !style.includes("line-through")
-              ) {
-                newValue = title;
+          // Only process if it's a select field and matches our criteria
+          if ((isAssignee || isStatus) && columnTypeAttr === "select") {
+            if (isAssignee) {
+              columnType = "assignee";
+            } else if (isStatus) {
+              columnType = "status";
+            }
+
+            // Find all choice tokens in this field
+            const choiceTokens = $container.find(".choiceToken");
+
+            if (choiceTokens.length > 0) {
+              choiceTokens.each((i, elem) => {
+                const $elem = $(elem);
+
+                // Get the value title
+                const title =
+                  $elem.find(".truncate-pre").attr("title") ||
+                  $elem.find(".truncate-pre").text().trim();
+
+                if (!title) return; // Skip if no title found
+
+                // METHOD 1: Check SVG icon (MOST RELIABLE - works across all color schemes)
+                const svgUse = $elem.find("svg use");
+                const href = svgUse.attr("href") || "";
+
+                if (href.includes("Plus")) {
+                  // Plus icon = Added value (new value)
+                  newValue = title;
+                  console.log(
+                    `[ParseRevision] Found NEW value (Plus icon): "${title}"`
+                  );
+                } else if (href.includes("Minus")) {
+                  oldValue = title;
+                  console.log(
+                    `[ParseRevision] Found OLD value (Minus icon): "${title}"`
+                  );
+                } else {
+                  const style = $elem.attr("style") || "";
+
+                  if (style.includes("line-through")) {
+                    oldValue = title;
+                    console.log(
+                      `[ParseRevision] Found OLD value (line-through): "${title}"`
+                    );
+                  } else {
+                    newValue = title;
+                    console.log(
+                      `[ParseRevision] Found NEW value (no indicators): "${title}"`
+                    );
+                  }
+                }
+              });
+
+              if (oldValue || newValue) {
+                console.log(
+                  `[ParseRevision] ${columnType} change: "${oldValue}" -> "${newValue}"`
+                );
               }
-            });
-
-            if (oldValue || newValue) {
-              console.log(
-                `[ParseRevision] Assignee change: "${oldValue}" -> "${newValue}"`
-              );
             }
           }
-        } else if (
-          fieldName.includes("status") &&
-          columnTypeAttr === "select"
-        ) {
-          columnType = "status";
 
-          const choiceTokens = $(".choiceToken");
-          if (choiceTokens.length > 0) {
-            choiceTokens.each((i, elem) => {
-              const $elem = $(elem);
-              const style = $elem.attr("style") || "";
-              const title =
-                $elem.find(".truncate-pre").attr("title") ||
-                $elem.find(".truncate-pre").text().trim();
+          if (
+            (columnType === "assignee" || columnType === "status") &&
+            (oldValue || newValue)
+          ) {
+            const userName =
+              activity.user?.name || activity.user?.email || "Unknown";
 
-              // Removed value (red/strikethrough)
-              if (style.includes("line-through") || style.includes("red")) {
-                oldValue = title;
-              }
-              // Added value (green, no strikethrough)
-              else if (
-                style.includes("green") &&
-                !style.includes("line-through")
-              ) {
-                newValue = title;
-              }
-            });
+            const revision = {
+              uuid:
+                activity.id ||
+                `${pageId}-${Date.now()}-${Math.random()
+                  .toString(36)
+                  .substr(2, 9)}`,
+              issueId: pageId,
+              columnType: columnType,
+              oldValue: oldValue || null,
+              newValue: newValue || null,
+              createdDate: new Date(activity.createdTime),
+              authoredBy: userName,
+            };
 
-            if (oldValue || newValue) {
-              console.log(
-                `[ParseRevision] Status change: "${oldValue}" -> "${newValue}"`
-              );
-            }
+            console.log(
+              `[ParseRevision] ✓ Tracked ${columnType} change by ${userName}: "${oldValue}" -> "${newValue}"`
+            );
+            revisions.push(revision);
           }
-        } else {
-          continue;
-        }
-
-        if (
-          (columnType === "assignee" || columnType === "status") &&
-          (oldValue || newValue)
-        ) {
-          const userName =
-            activity.user?.name || activity.user?.email || "Unknown";
-
-          const revision = {
-            uuid:
-              activity.id ||
-              `${pageId}-${Date.now()}-${Math.random()
-                .toString(36)
-                .substr(2, 9)}`,
-            issueId: pageId,
-            columnType: columnType,
-            oldValue: oldValue || null,
-            newValue: newValue || null,
-            createdDate: new Date(activity.createdTime),
-            authoredBy: userName,
-          };
-
-          console.log(
-            `[ParseRevision] Tracked ${columnType} change by ${userName}`
-          );
-          revisions.push(revision);
-        }
+        });
       } catch (error) {
         console.error("[ParseRevision] Error parsing activity:", error);
       }
@@ -1139,6 +1144,8 @@ export class ScrapingService {
 
     if (revisions.length > 0) {
       console.log(`[ParseRevision] Total tracked changes: ${revisions.length}`);
+    } else {
+      console.log("[ParseRevision] No assignee or status changes found");
     }
 
     return revisions;
@@ -1150,10 +1157,9 @@ export class ScrapingService {
   ): Promise<void> {
     try {
       const cookies = await this.getOrExtractCookies();
+      console.log("[FetchAllRevisions] ✓ Cookies retrieved");
 
-      console.log(
-        "[FetchAllRevisions] Validating cookies before bulk fetch..."
-      );
+      console.log("[FetchAllRevisions] Validating cookies...");
       const cookieDoc = await CookieStore.findOne().sort({ updatedAt: -1 });
       if (cookieDoc && !cookieDoc.isValid) {
         throw new Error(
@@ -1161,33 +1167,72 @@ export class ScrapingService {
         );
       }
 
-      const pages = await Page.find();
-      const totalPages = pages.length;
+      const allPages = await Page.find();
+      const totalPagesInDB = allPages.length;
+      console.log(
+        `[FetchAllRevisions] Total pages in database: ${totalPagesInDB}`
+      );
+
+      const existingRevisionDocs = await RevisionHistory.find().select(
+        "pageId updatedAt"
+      );
+      const existingMap = new Map(
+        existingRevisionDocs.map((doc) => [doc.pageId, doc.updatedAt])
+      );
 
       console.log(
-        `[FetchAllRevisions] Starting batch fetch for ${totalPages} pages`
+        `[FetchAllRevisions] Existing revision documents: ${existingMap.size}`
+      );
+      console.log(
+        `[FetchAllRevisions] Will re-fetch ALL pages to check for updates`
+      );
+
+      const pagesToProcess = allPages.filter(
+        (p) => p.baseId && p.tableId && p.pageId
+      );
+
+      console.log(
+        `[FetchAllRevisions] Pages to process: ${pagesToProcess.length}`
       );
       console.log(`[FetchAllRevisions] Batch size: ${batchSize}`);
+
+      if (pagesToProcess.length === 0) {
+        console.log(
+          "[FetchAllRevisions] ========================================"
+        );
+        console.log("[FetchAllRevisions] No valid pages to process!");
+        console.log(
+          "[FetchAllRevisions] ========================================"
+        );
+        return;
+      }
 
       let processed = 0;
       let withHistory = 0;
       let withoutHistory = 0;
+      let updated = 0;
+      let newPages = 0;
       let errors = 0;
+      const failedPages: Array<{ pageId: string; error: string }> = [];
 
-      // Process in batches
-      for (let i = 0; i < pages.length; i += batchSize) {
-        const batch = pages.slice(i, i + batchSize);
+      for (let i = 0; i < pagesToProcess.length; i += batchSize) {
+        const batch = pagesToProcess.slice(i, i + batchSize);
         const batchNumber = Math.floor(i / batchSize) + 1;
-        const totalBatches = Math.ceil(pages.length / batchSize);
+        const totalBatches = Math.ceil(pagesToProcess.length / batchSize);
 
         console.log(
-          `[FetchAllRevisions] Processing batch ${batchNumber}/${totalBatches} (${batch.length} pages)`
+          `[FetchAllRevisions] ----------------------------------------`
+        );
+        console.log(
+          `[FetchAllRevisions] Batch ${batchNumber}/${totalBatches} (${batch.length} pages)`
         );
 
-        // Process batch in parallel
         const results = await Promise.allSettled(
           batch.map(async (page) => {
             try {
+              const wasProcessedBefore = existingMap.has(page.pageId);
+              const lastUpdated = existingMap.get(page.pageId);
+
               const revisions = await this.fetchRevisionHistory(
                 page.baseId,
                 page.tableId,
@@ -1195,82 +1240,202 @@ export class ScrapingService {
                 cookies
               );
 
-              // Store in database if we got revisions
+              const isUpdate = wasProcessedBefore && revisions.length > 0;
+              const isNew = !wasProcessedBefore && revisions.length > 0;
+
               if (revisions.length > 0) {
-                await RevisionHistory.findOneAndUpdate(
-                  { pageId: page.pageId },
-                  {
-                    pageId: page.pageId,
-                    baseId: page.baseId,
-                    tableId: page.tableId,
-                    revisions,
-                    updatedAt: new Date(),
-                  },
-                  { upsert: true, new: true }
-                );
-                return { success: true, hasHistory: true, pageId: page.pageId };
+                if (isUpdate) {
+                  console.log(
+                    `[FetchAllRevisions]   ↻ ${page.pageId}: ${revisions.length} changes (updated)`
+                  );
+                } else {
+                  console.log(
+                    `[FetchAllRevisions]   ✓ ${page.pageId}: ${revisions.length} changes (new)`
+                  );
+                }
+
+                return {
+                  success: true,
+                  hasHistory: true,
+                  pageId: page.pageId,
+                  baseId: page.baseId,
+                  tableId: page.tableId,
+                  revisions,
+                  revisionCount: revisions.length,
+                  isUpdate: isUpdate,
+                  isNew: isNew,
+                };
               } else {
+                if (wasProcessedBefore) {
+                  console.log(
+                    `[FetchAllRevisions]   ⊙ ${page.pageId}: Still no history`
+                  );
+                } else {
+                  console.log(
+                    `[FetchAllRevisions]   ○ ${page.pageId}: No history`
+                  );
+                }
+
                 return {
                   success: true,
                   hasHistory: false,
                   pageId: page.pageId,
+                  revisionCount: 0,
+                  isUpdate: false,
+                  isNew: false,
                 };
               }
             } catch (error: any) {
+              console.error(
+                `[FetchAllRevisions]   ✗ ${page.pageId}: ${error.message}`
+              );
+
               if (error.message === "COOKIES_EXPIRED") {
-                throw error; // Propagate to stop processing
+                throw error;
               }
+
+              if (error.response?.status === 404) {
+                console.log(
+                  `[FetchAllRevisions]   ○ ${page.pageId}: No history (404)`
+                );
+                return {
+                  success: true,
+                  hasHistory: false,
+                  pageId: page.pageId,
+                  revisionCount: 0,
+                  isUpdate: false,
+                  isNew: false,
+                };
+              }
+
               return {
                 success: false,
                 error: error.message,
                 pageId: page.pageId,
+                statusCode: error.response?.status,
               };
             }
           })
         );
 
-        // Analyze results
-        for (const result of results) {
-          processed++;
+        // BULK WRITE - Collect pages with revisions for bulk save
+        const bulkOps: any[] = [];
+
+        // Analyze results from this batch
+        for (let j = 0; j < results.length; j++) {
+          const result = results[j];
+          const pageId = batch[j].pageId;
 
           if (result.status === "fulfilled") {
             const value = result.value as any;
+
             if (value.success) {
+              processed++;
+
               if (value.hasHistory) {
                 withHistory++;
+
+                if (value.isUpdate) {
+                  updated++;
+                } else if (value.isNew) {
+                  newPages++;
+                }
+
+                bulkOps.push({
+                  updateOne: {
+                    filter: { pageId: value.pageId },
+                    update: {
+                      $set: {
+                        pageId: value.pageId,
+                        baseId: value.baseId,
+                        tableId: value.tableId,
+                        revisions: value.revisions,
+                        updatedAt: new Date(),
+                      },
+                    },
+                    upsert: true,
+                  },
+                });
               } else {
                 withoutHistory++;
               }
             } else {
               errors++;
+              failedPages.push({
+                pageId: value.pageId,
+                error: value.error || "Unknown error",
+              });
               console.error(
-                `[FetchAllRevisions] Error on ${value.pageId}: ${value.error}`
+                `[FetchAllRevisions]   Failed: ${value.pageId} - ${
+                  value.error
+                }${value.statusCode ? ` (${value.statusCode})` : ""}`
               );
             }
           } else {
             errors++;
+            processed++;
+            const error = result.reason;
 
-            if (result.reason?.message === "COOKIES_EXPIRED") {
-              throw new Error("Cookies expired. Please re-authenticate.");
+            failedPages.push({
+              pageId: pageId,
+              error: error?.message || "Promise rejected",
+            });
+
+            console.error(
+              `[FetchAllRevisions]   Rejected: ${pageId} - ${
+                error?.message || error
+              }`
+            );
+
+            if (error?.message === "COOKIES_EXPIRED") {
+              console.error(
+                "[FetchAllRevisions] ========================================"
+              );
+              console.error(
+                "[FetchAllRevisions] FATAL: Cookies expired mid-process"
+              );
+              console.error(
+                "[FetchAllRevisions] ========================================"
+              );
+              throw new Error(
+                "Cookies expired during processing. Please re-authenticate."
+              );
             }
           }
         }
 
-        // Progress update
+        if (bulkOps.length > 0) {
+          try {
+            const bulkResult = await RevisionHistory.bulkWrite(bulkOps, {
+              ordered: false,
+            });
+
+            const savedCount =
+              bulkResult.upsertedCount + bulkResult.modifiedCount;
+            console.log(
+              `[FetchAllRevisions]   💾 Bulk saved ${savedCount} documents`
+            );
+          } catch (bulkError: any) {
+            console.error(
+              `[FetchAllRevisions]   ✗ Bulk write error: ${bulkError.message}`
+            );
+          }
+        }
+
         const progress = {
           processed,
-          total: totalPages,
+          total: pagesToProcess.length,
           withHistory,
           withoutHistory,
+          updated,
+          newPages,
           errors,
-          percentage: Math.round((processed / totalPages) * 100),
+          percentage: Math.round((processed / pagesToProcess.length) * 100),
         };
 
         console.log(
-          `[FetchAllRevisions] Progress: ${progress.percentage}% | ` +
-            `With history: ${withHistory} | ` +
-            `No history: ${withoutHistory} | ` +
-            `Errors: ${errors}`
+          `[FetchAllRevisions]   Progress: ${progress.percentage}% ` +
+            `(${newPages} new, ${updated} updated, ${withoutHistory} no history, ${errors} errors)`
         );
 
         // Call progress callback
@@ -1278,36 +1443,97 @@ export class ScrapingService {
           progressCallback(progress);
         }
 
-        // Rate limiting between batches
-        if (i + batchSize < pages.length) {
+        if (i + batchSize < pagesToProcess.length) {
           const delayTime = this.requestDelay + Math.random() * 500;
           console.log(
-            `[FetchAllRevisions] Waiting ${delayTime}ms before next batch...`
+            `[FetchAllRevisions]   Waiting ${delayTime.toFixed(
+              0
+            )}ms before next batch...`
           );
           await this.delay(delayTime);
         }
       }
 
-      console.log("[FetchAllRevisions] Batch fetch completed successfully");
-      console.log(`[FetchAllRevisions] Final Stats:`);
-      console.log(`[FetchAllRevisions]   Pages with history: ${withHistory}`);
       console.log(
-        `[FetchAllRevisions]   Pages without history: ${withoutHistory}`
+        "\n[FetchAllRevisions] ========================================"
       );
-      console.log(`[FetchAllRevisions]   Errors: ${errors}`);
+      console.log("[FetchAllRevisions] ✓✓✓ FETCH COMPLETE ✓✓✓");
       console.log(
-        `[FetchAllRevisions]   Total processed: ${processed}/${totalPages}`
+        "[FetchAllRevisions] ========================================"
       );
-    } catch (error: any) {
-      if (error.message === "COOKIES_EXPIRED") {
-        console.error(
-          "[FetchAllRevisions] Fatal error: Cookies expired. Please re-authenticate."
-        );
-        throw new Error(
-          "Cookies expired. Please re-authenticate at /authentication with your MFA code."
+      console.log(`[FetchAllRevisions] Total pages processed: ${processed}`);
+      console.log(
+        `[FetchAllRevisions]   - New pages with history: ${newPages}`
+      );
+      console.log(`[FetchAllRevisions]   - Updated pages: ${updated}`);
+      console.log(
+        `[FetchAllRevisions]   - Pages without history: ${withoutHistory}`
+      );
+      console.log(`[FetchAllRevisions]   - Errors: ${errors}`);
+
+      if (processed > 0) {
+        const successRate = ((processed - errors) / processed) * 100;
+        console.log(
+          `[FetchAllRevisions] Success rate: ${successRate.toFixed(1)}%`
         );
       }
-      console.error("[FetchAllRevisions] Fatal error:", error.message);
+
+      if (failedPages.length > 0) {
+        console.log(
+          `\n[FetchAllRevisions] Failed pages (${failedPages.length}):`
+        );
+        failedPages.slice(0, 10).forEach((failed) => {
+          console.log(
+            `[FetchAllRevisions]   - ${failed.pageId}: ${failed.error}`
+          );
+        });
+        if (failedPages.length > 10) {
+          console.log(
+            `[FetchAllRevisions]   ... and ${failedPages.length - 10} more`
+          );
+        }
+      }
+
+      const dbCount = await RevisionHistory.countDocuments();
+      const dbWithHistory = await RevisionHistory.countDocuments({
+        "revisions.0": { $exists: true },
+      });
+
+      console.log(`\n[FetchAllRevisions] Database state:`);
+      console.log(`[FetchAllRevisions]   Total documents: ${dbCount}`);
+      console.log(`[FetchAllRevisions]   With revisions: ${dbWithHistory}`);
+      console.log(
+        `[FetchAllRevisions]   Coverage: ${(
+          (dbWithHistory / totalPagesInDB) *
+          100
+        ).toFixed(1)}%`
+      );
+      console.log(
+        "[FetchAllRevisions] ========================================\n"
+      );
+    } catch (error: any) {
+      if (
+        error.message === "COOKIES_EXPIRED" ||
+        error.message.includes("re-authenticate")
+      ) {
+        console.error(
+          "\n[FetchAllRevisions] ========================================"
+        );
+        console.error("[FetchAllRevisions] FATAL ERROR: Cookies Expired");
+        console.error(
+          "[FetchAllRevisions] ========================================"
+        );
+        throw error;
+      }
+
+      console.error(
+        "\n[FetchAllRevisions] ========================================"
+      );
+      console.error("[FetchAllRevisions] FATAL ERROR");
+      console.error(
+        "[FetchAllRevisions] ========================================"
+      );
+      console.error(`[FetchAllRevisions] ${error.message}`);
       throw error;
     }
   }
